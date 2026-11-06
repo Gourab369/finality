@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.snap.new
+*.pending-snap
+/openspec/
+/Draft.txt
+/DESIGN.md

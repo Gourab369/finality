@@ -1,0 +1,33 @@
+[package]
+name = "finality"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "finality"
+path = "src/main.rs"
+
+[dependencies]
+h_agent_core.workspace = true
+h_agent_store.workspace = true
+h_agent_llm.workspace = true
+h_agent_safety.workspace = true
+h_agent_sandbox.workspace = true
+h_agent_tools.workspace = true
+h_agent_mcp.workspace = true
+h_agent_memory.workspace = true
+h_agent_agents.workspace = true
+h_agent_tui.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

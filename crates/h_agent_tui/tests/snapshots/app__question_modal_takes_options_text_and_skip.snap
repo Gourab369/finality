@@ -1,0 +1,20 @@
+---
+source: crates/h_agent_tui/tests/app.rs
+expression: "draw(&mut app, 80, 16).backend()"
+---
+" Finality │ C:\src\app │ no session │ mode: cowork │ ollama:qwen3:14b │ think: m"
+"                                                                                "
+"  ┌ Question ─ orchestrator · 1 of 3 ────────────────────────────────────────┐  "
+"  │Which config format should the flag use?                                  │  "
+"  │                                                                          │  "
+"  │[1] TOML                                                                  │  "
+"  │[2] environment variable                                                  │  "
+"  │                                                                          │  "
+"  │Answer: ▌                                                                 │  "
+"  │1-9 pick · type an answer · Enter send · Esc skip                         │  "
+"  └──────────────────────────────────────────────────────────────────────────┘  "
+"                                                                                "
+"┌ › ───────────────────────────────────────────────────────────────────────────┐"
+"│ Ask anything, or type / for commands                                         │"
+"└─────────────────────── Enter send · Shift/Alt+Enter newline · Ctrl+O details ┘"
+" in 0 · out 0 · ctx – · Σ 0/0  ? 3 question(s)                                  "

@@ -1,0 +1,52 @@
+# cargo-deny configuration (run by CI: `cargo deny check`).
+
+[graph]
+all-features = false
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Add RUSTSEC ids here (with a comment) only after checking the issue cannot affect this binary.
+ignore = [
+    # `paste` is a compile-time proc-macro pulled in by ratatui 0.29 / tui-textarea; no runtime code.
+    { id = "RUSTSEC-2024-0436", reason = "proc-macro only, via ratatui; goes away with the next ratatui release" },
+    # zbus 5 companion crates were merged into zbus 6; they arrive through keyring's Linux
+    # Secret Service backend (secret-service 5 -> zbus 5) and are updated upstream.
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names via keyring's secret-service backend; wait for secret-service on zbus 6" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant via keyring's secret-service backend; wait for secret-service on zbus 6" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via keyring's secret-service backend; wait for secret-service on zbus 6" },
+]
+
+[licenses]
+# The workspace crates are `publish = false`; only dependencies are checked.
+private = { ignore = true }
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace crates reference each other by path without a version.
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

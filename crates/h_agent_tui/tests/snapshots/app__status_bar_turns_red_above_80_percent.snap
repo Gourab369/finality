@@ -1,0 +1,12 @@
+---
+source: crates/h_agent_tui/tests/app.rs
+expression: t.backend()
+---
+" Finality │ C:\src\app │ no session │ mode: cowork │ ollama:qwen3:14b │ think: m"
+"                                                                                "
+"  Type a request to start a session.                                            "
+"  /help lists commands · Ctrl+C twice quits                                     "
+"┌ › ───────────────────────────────────────────────────────────────────────────┐"
+"│ Ask anything, or type / for commands                                         │"
+"└─────────────────────── Enter send · Shift/Alt+Enter newline · Ctrl+O details ┘"
+" in 29,000 · out 1,000 · ctx 30.0k/32.0k (6% free) · Σ 90.0k/4.0k               "

@@ -1,0 +1,74 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+license = "Apache-2.0"
+
+[workspace.dependencies]
+h_agent_core = { path = "crates/h_agent_core" }
+h_agent_store = { path = "crates/h_agent_store" }
+h_agent_llm = { path = "crates/h_agent_llm" }
+h_agent_safety = { path = "crates/h_agent_safety" }
+h_agent_tools = { path = "crates/h_agent_tools" }
+h_agent_mcp = { path = "crates/h_agent_mcp" }
+h_agent_sandbox = { path = "crates/h_agent_sandbox" }
+h_agent_memory = { path = "crates/h_agent_memory" }
+h_agent_agents = { path = "crates/h_agent_agents" }
+h_agent_tui = { path = "crates/h_agent_tui" }
+
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+chromiumoxide = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+clap = { version = "4", features = ["derive"] }
+crc32fast = "1"
+crossterm = { version = "0.28", features = ["event-stream"] }
+dirs = "6"
+dunce = "1"
+futures = "0.3"
+globset = "0.4"
+ignore = "0.4"
+insta = "1"
+keyring = "4.2"
+landlock = "0.4"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+proptest = "1"
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
+process-wrap = { version = "10", features = ["tokio1"] }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+httpdate = "1"
+zeroize = "1"
+rmcp = { version = "3.8", default-features = false, features = ["base64", "client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth", "reqwest"] }
+scraper = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "2"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process", "fs"] }
+tokio-util = "0.7"
+toml = "0.9"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tui-textarea = "0.7"
+unicode-width = "0.2"
+ulid = { version = "1", features = ["serde"] }
+url = "2"
+wiremock = "0.6"
+zstd = "0.13"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
