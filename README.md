@@ -5,9 +5,6 @@ delegates tasks to Worker and Research sub-agents. Background agents keep memory
 small knowledge base. It runs local models through [Ollama](https://ollama.com) by default, and can also use OpenAI-compatible
 endpoints, Anthropic and local `.gguf` models through llama.cpp.
 
-The library crates, environment variables (`H_AGENT_*`) and the data directory (`~/.h_agent`) still use the working name
-`h_agent`.
-
 ## Requirements
 
 - One of:
@@ -15,37 +12,31 @@ The library crates, environment variables (`H_AGENT_*`) and the data directory (
   - An OpenAI-compatible endpoint, or an Anthropic API key.
   - [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server`) and downloaded `.gguf` model files.
 - Optional: Chrome or Chromium for the browser tools, and MCP servers.
-- Windows 10+, Linux or macOS. Use a terminal with keyboard enhancement (Windows Terminal, kitty, WezTerm, iTerm2) for
-  Shift+Enter; Alt+Enter works everywhere.
+- Windows 10+ (pre-built binaries and CI). The code also targets Linux and macOS, but there are no binaries for them yet
+  and they are not tested in CI; see [Roadmap](#roadmap). Use a terminal with keyboard enhancement (Windows Terminal, kitty,
+  WezTerm, iTerm2) for Shift+Enter; Alt+Enter works everywhere.
 - Building from source only: Rust 1.89 or newer (the repository pins a toolchain in `rust-toolchain.toml`).
 
 ## Install
 
-### Pre-built binaries (recommended)
+### Pre-built binaries (recommended, Windows)
 
-Download the archive for your system from the [Releases](https://github.com/Gourab369/finality/releases) page:
+Download `finality-<version>-windows-x86_64.zip` from the [Releases](https://github.com/Gourab369/finality/releases) page.
 
-| System | Archive |
-|---|---|
-| Windows x86_64 | `finality-<version>-windows-x86_64.zip` |
-| Linux x86_64 | `finality-<version>-linux-x86_64.tar.gz` |
-| macOS Apple Silicon | `finality-<version>-macos-arm64.tar.gz` |
-
-1. Check the download against `SHA256SUMS.txt` from the same release:
-   - Windows (PowerShell): `(Get-FileHash .\finality-<version>-windows-x86_64.zip).Hash` and compare it with the line for
-     that file (the case of the letters does not matter).
-   - Linux / macOS: `sha256sum --ignore-missing -c SHA256SUMS.txt` (macOS: `shasum -a 256 --ignore-missing -c SHA256SUMS.txt`).
-2. Unpack it and put `finality` (`finality.exe` on Windows) in a folder on your `PATH`, for example
-   `%USERPROFILE%\.local\bin` or `~/.local/bin`.
+1. Check the download against `SHA256SUMS.txt` from the same release: in PowerShell,
+   `(Get-FileHash .\finality-<version>-windows-x86_64.zip).Hash` must match the hash in that file (the case of the letters
+   does not matter).
+2. Unpack it and put `finality.exe` in a folder on your `PATH`, for example `%USERPROFILE%\.local\bin`.
 3. Run `finality --version`.
 
-The binaries are not code-signed yet. Windows SmartScreen may warn on first start (**More info → Run anyway**), and macOS
-may block it until you run `xattr -d com.apple.quarantine finality`.
+The binary is not code-signed yet, so Windows SmartScreen may warn on first start (**More info → Run anyway**).
+
+On Linux and macOS, install from source.
 
 ### From source
 
 ```sh
-cargo install --git https://github.com/Gourab369/finality --tag v0.2.0 --locked finality
+cargo install --git https://github.com/Gourab369/finality --tag v0.3.0 --locked finality
 # or, in a clone of the repository:
 cargo install --path crates/finality --locked
 ```
@@ -58,12 +49,12 @@ same command again (add `--force` if Cargo says it is already installed), after 
 Bump `version` in the workspace `Cargo.toml`, run `cargo update --workspace`, commit, then push a tag:
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
-The `Release` workflow builds the three archives (each with the binary, `LICENSE` and this README), writes
-`SHA256SUMS.txt`, and publishes them as a GitHub Release with generated notes.
+The `Release` workflow builds the Windows archive (the binary, `LICENSE` and this README), writes `SHA256SUMS.txt`, and
+publishes both as a GitHub Release with generated notes.
 
 ## Quick start
 
@@ -82,13 +73,13 @@ The directory where you start `finality` is the **working directory**. File tool
 Settings are layered. Higher layers override lower ones:
 
 1. CLI flags.
-2. Environment variables: `H_AGENT_<SECTION>__<KEY>`, for example `H_AGENT_GENERAL__DEFAULT_MODE=auto-edit` or
-   `H_AGENT_PROVIDER__OLLAMA__MODEL=qwen3:8b`.
-3. `~/.h_agent/config.toml` (or the file passed with `--config`).
+2. Environment variables: `FINALITY_<SECTION>__<KEY>`, for example `FINALITY_GENERAL__DEFAULT_MODE=auto-edit` or
+   `FINALITY_PROVIDER__OLLAMA__MODEL=qwen3:8b`.
+3. `~/.finality/config.toml` (or the file passed with `--config`).
 4. Built-in defaults.
 
 Every key is optional; all keys and their defaults are defined in
-[crates/h_agent_core/src/config.rs](crates/h_agent_core/src/config.rs). A small example:
+[crates/finality_core/src/config.rs](crates/finality_core/src/config.rs). A small example:
 
 ```toml
 [general]
@@ -109,7 +100,7 @@ memory = "ollama:qwen3:4b"
 os_sandbox = false       # Linux/macOS only, see below
 ```
 
-Set `H_AGENT_HOME` to move the data directory (default `~/.h_agent`). `H_AGENT_LOG` (or `RUST_LOG`) sets the log level.
+Set `FINALITY_HOME` to move the data directory (default `~/.finality`). `FINALITY_LOG` (or `RUST_LOG`) sets the log level.
 
 ### CLI flags
 
@@ -122,6 +113,7 @@ finality [PROMPT]
   --resume <SESSION_ID>
   --no-mcp                               do not use MCP servers
   --decide                               enable the decision model
+  --direct                               turn direct mode on (stays on until /direct off)
   --config <PATH>
 ```
 
@@ -135,7 +127,7 @@ finality [PROMPT]
 | `llamacpp` | Local `.gguf` models run by [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`; see below. No API key. |
 
 API keys are read from the environment variable named in `api_key_env` (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` by default).
-If that variable is not set, they are read from the OS keyring: service `h_agent`, user `api-key:<provider>`. Keys are never
+If that variable is not set, they are read from the OS keyring: service `finality`, user `api-key:<provider>`. Keys are never
 written to the config, the session logs or the log file.
 
 Switch providers at runtime with `/provider <name> [model]` or `/model <name>`.
@@ -176,7 +168,7 @@ crashes. The server's output goes to Finality's log file.
 
 ### MCP servers
 
-MCP servers use the Claude Code `mcpServers` format, in `~/.h_agent/mcp.json` (global) and `<project>/.mcp.json` (project):
+MCP servers use the Claude Code `mcpServers` format, in `~/.finality/mcp.json` (global) and `<project>/.mcp.json` (project):
 
 ```json
 { "mcpServers": {
@@ -203,6 +195,15 @@ applies to every request the page makes (scripts, images, frames, redirects), no
 
 With `--decide` or `/decide on`, small classification calls (triage, template fit, retry advice) go to a fast decision model
 (`decision.model`, served next to Ollama). Its answers are used only when they are confident; otherwise the main LLM decides.
+
+### Direct mode
+
+`/direct` (or `/direct on`, or `--direct` at start) adds a short section to the Orchestrator's and sub-agents' system prompts:
+assume technical requests have a legitimate purpose, answer fully without moralizing or unrequested warnings, treat security
+work on your own or authorized targets as in scope, and when declining part of a request say which part and why. The text is
+in `crates/finality_agents/prompts/direct.md`. It reduces needless refusals; it does not override what a model was trained
+never to do, and it does not change modes, approvals or the handling of untrusted content. The setting is saved in
+`~/.finality/state.json` and stays on across sessions until `/direct off`; the status bar shows `direct` while it is on.
 
 ## Modes
 
@@ -252,6 +253,7 @@ for outside or unverifiable actions.
 | `/agents`, `/tasks` | Show running agents and the current plan |
 | `/subagents <n>` | Set how many sub-agents may run at once |
 | `/decide <on\|off>` | Use the decision model where it is confident |
+| `/direct [on\|off]` | Toggle direct mode (fewer refusals and disclaimers); remembered until switched off |
 | `/memory [recall <query>\|review]` | Show the memory digest, search past sessions, or review notes the learner made about you |
 | `/skills [review]` | List skills, or review skills the learner proposed |
 | `/skill <name> [args]`, `/<name> [args]` | Run a skill |
@@ -261,7 +263,7 @@ for outside or unverifiable actions.
 | `/agent [list\|show <name>\|delete <name>]` | List, show or delete custom agents |
 | `/quit`, `/exit` | Finish the session and exit |
 
-Skills are Claude Code compatible `SKILL.md` folders in `~/.h_agent/skills/<name>/`. Finality ships one built-in skill,
+Skills are Claude Code compatible `SKILL.md` folders in `~/.finality/skills/<name>/`. Finality ships one built-in skill,
 `stubborn` (`/stubborn <request>`): retry failed work with a different approach each time until it is done or blocked by
 something only you can resolve. A skill folder with the same name replaces the built-in one.
 
@@ -272,23 +274,24 @@ with their own instructions on a worker or research base, and optionally a narro
 reviewer agent that checks for panics and missing tests"), or let the Orchestrator create one when a kind of task keeps
 coming back. Creating an agent always needs your approval, whatever the mode, and is not possible in `plan` mode.
 
-Custom agents live in `~/.h_agent/agents/<name>/AGENT.md`, where you can edit them. `/agent` lists them,
+Custom agents live in `~/.finality/agents/<name>/AGENT.md`, where you can edit them. `/agent` lists them,
 `/agent show <name>` prints one, and `/agent delete <name>` removes it. A custom agent can only use worker, research and
 MCP tools, and the mode and approvals still apply to everything it does.
 
 ## Data directory
 
 ```
-~/.h_agent/                  # private to your user on Linux and macOS (mode 0700)
+~/.finality/                  # private to your user on Linux and macOS (mode 0700)
 ├── config.toml, mcp.json
 ├── projects.json            # known projects, sessions, MCP trust
+├── state.json               # settings toggled in the UI that persist (direct mode)
 ├── sessions/                # session logs (*.hlog) and index.jsonl; tool output is redacted
 ├── memory/                  # memory event trees, user_profile.md (editable) and user_profile.pending.md
 ├── skills/                  # skills; skills/_pending holds learner proposals
 ├── agents/                  # custom agents (AGENT.md)
 ├── knowledgepedia/          # learned topic notes
 ├── lookup/, plans/          # plan scoring data
-└── logs/h_agent.log         # rotated daily, 7 files kept; secrets are redacted
+└── logs/finality.log         # rotated daily, 7 files kept; secrets are redacted
 ```
 
 Several `finality` processes can run at the same time; shared files are updated under locks.
@@ -352,8 +355,8 @@ cargo test --all
 cargo deny check            # advisories, licences, duplicate/wildcard bans (cargo install cargo-deny)
 ```
 
-CI runs the same checks on Windows, Linux and macOS, plus `cargo deny` and a build with the minimum supported Rust (1.89).
-The Linux and macOS jobs also run the OS sandbox tests. Pushing a `v*` tag builds the release archives and their checksums
+CI runs the same checks on Windows, plus `cargo deny` and a build with the minimum supported Rust (1.89). The OS sandbox tests
+(Linux and macOS only) are not run in CI. Pushing a `v*` tag builds the release archive and its checksum
 (see [Releasing](#releasing-maintainers)).
 
 Session logs grow without limit by default; set `general.session_retention_days` or run `/sessions prune <days>` to delete
@@ -362,13 +365,12 @@ closed sessions older than a cutoff.
 ## Roadmap
 
 Platforms:
-- [ ] macOS on Intel (`x86_64-apple-darwin`): no pre-built binary yet; install from source.
-- [ ] Linux on ARM (`aarch64-unknown-linux-gnu`): no pre-built binary yet; install from source.
-- [ ] Older Linux distributions: the Linux binary is linked against a recent glibc; a static `musl` build is planned.
-- [ ] Linux and macOS are built and tested in CI but have had little hands-on use so far; reports are welcome.
+- [ ] Linux (x86_64, ARM) and macOS (Apple Silicon, Intel): pre-built release binaries, and CI on both systems again
+  (including the OS sandbox tests). Until then, install from source; the code supports them, but they are untested.
+- [ ] Linux: a static `musl` build so the binary runs on older distributions.
 
 Distribution:
-- [ ] Code-signed Windows binaries and notarized macOS binaries.
+- [ ] Code-signed Windows binaries (and notarized macOS binaries once those exist).
 - [ ] Package managers: winget, Scoop and Homebrew.
 
 ## License

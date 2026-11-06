@@ -8,53 +8,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive: finality-${{ github.ref_name }}-linux-x86_64.tar.gz
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            archive: finality-${{ github.ref_name }}-macos-arm64.tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: finality-${{ github.ref_name }}-windows-x86_64.zip
-    runs-on: ${{ matrix.os }}
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      ARCHIVE: finality-${{ github.ref_name }}-windows-x86_64.zip
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked -p finality --target ${{ matrix.target }}
-      - name: Package (unix)
-        if: runner.os != 'Windows'
-        run: |
-          cp LICENSE README.md target/${{ matrix.target }}/release/
-          tar -C target/${{ matrix.target }}/release -czf ${{ matrix.archive }} finality LICENSE README.md
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        run: Compress-Archive -Path target/${{ matrix.target }}/release/finality.exe, LICENSE, README.md -DestinationPath ${{ matrix.archive }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.archive }}
-          path: ${{ matrix.archive }}
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
+      - run: cargo build --release --locked -p finality --target $env:TARGET
+      - name: Package
+        run: Compress-Archive -Path "target/$env:TARGET/release/finality.exe", LICENSE, README.md -DestinationPath $env:ARCHIVE
+      # Same format as `sha256sum`, so `sha256sum -c` also accepts it.
       - name: Checksums
-        working-directory: dist
-        run: sha256sum finality-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+        run: |
+          $hash = (Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLower()
+          "$hash  $env:ARCHIVE" | Out-File -Encoding utf8NoBOM SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            ${{ env.ARCHIVE }}
+            SHA256SUMS.txt
           generate_release_notes: true

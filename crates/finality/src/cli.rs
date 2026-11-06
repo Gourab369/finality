@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use h_agent_core::config::Config;
-use h_agent_core::{Mode, ProviderKind, SessionId, ThinkLevel};
+use finality_core::config::Config;
+use finality_core::{Mode, ProviderKind, SessionId, ThinkLevel};
 
 /// Multi-agent coding and research harness.
 #[derive(Debug, Parser)]
@@ -43,6 +43,10 @@ pub struct Cli {
     /// Enable the decision model.
     #[arg(long)]
     pub decide: bool,
+
+    /// Turn direct mode on (fewer refusals and disclaimers); it stays on until `/direct off`.
+    #[arg(long)]
+    pub direct: bool,
 
     /// Path to config.toml (default: <data dir>/config.toml).
     #[arg(long)]

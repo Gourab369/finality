@@ -1124,24 +1124,208 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "finality"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
- "h_agent_agents",
- "h_agent_core",
- "h_agent_llm",
- "h_agent_mcp",
- "h_agent_memory",
- "h_agent_safety",
- "h_agent_sandbox",
- "h_agent_store",
- "h_agent_tools",
- "h_agent_tui",
+ "finality_agents",
+ "finality_core",
+ "finality_llm",
+ "finality_mcp",
+ "finality_memory",
+ "finality_safety",
+ "finality_sandbox",
+ "finality_store",
+ "finality_tools",
+ "finality_tui",
  "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "finality_agents"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dunce",
+ "finality_core",
+ "finality_llm",
+ "finality_mcp",
+ "finality_memory",
+ "finality_safety",
+ "finality_sandbox",
+ "finality_store",
+ "finality_tools",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "finality_core"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "dunce",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml",
+ "ulid",
+]
+
+[[package]]
+name = "finality_llm"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "finality_core",
+ "futures",
+ "httpdate",
+ "keyring",
+ "process-wrap",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "wiremock",
+ "zeroize",
+]
+
+[[package]]
+name = "finality_mcp"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "dunce",
+ "finality_core",
+ "finality_safety",
+ "finality_store",
+ "finality_tools",
+ "futures",
+ "keyring",
+ "process-wrap",
+ "reqwest 0.12.28",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "finality_memory"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "finality_core",
+ "finality_store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "finality_safety"
+version = "0.3.0"
+dependencies = [
+ "dunce",
+ "finality_core",
+ "proptest",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "finality_sandbox"
+version = "0.3.0"
+dependencies = [
+ "landlock",
+]
+
+[[package]]
+name = "finality_store"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "crc32fast",
+ "dirs",
+ "dunce",
+ "finality_core",
+ "postcard",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
+name = "finality_tools"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chromiumoxide",
+ "dunce",
+ "finality_core",
+ "finality_safety",
+ "finality_sandbox",
+ "finality_store",
+ "futures",
+ "globset",
+ "ignore",
+ "process-wrap",
+ "regex",
+ "reqwest 0.12.28",
+ "scraper",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "finality_tui"
+version = "0.3.0"
+dependencies = [
+ "crossterm",
+ "finality_core",
+ "futures",
+ "insta",
+ "ratatui",
+ "tokio",
+ "tui-textarea",
 ]
 
 [[package]]
@@ -1372,190 +1556,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "h_agent_agents"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "chrono",
- "dunce",
- "futures",
- "h_agent_core",
- "h_agent_llm",
- "h_agent_mcp",
- "h_agent_memory",
- "h_agent_safety",
- "h_agent_sandbox",
- "h_agent_store",
- "h_agent_tools",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "wiremock",
-]
-
-[[package]]
-name = "h_agent_core"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "dunce",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "toml",
- "ulid",
-]
-
-[[package]]
-name = "h_agent_llm"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "futures",
- "h_agent_core",
- "httpdate",
- "keyring",
- "process-wrap",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "wiremock",
- "zeroize",
-]
-
-[[package]]
-name = "h_agent_mcp"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "dunce",
- "futures",
- "h_agent_core",
- "h_agent_safety",
- "h_agent_store",
- "h_agent_tools",
- "keyring",
- "process-wrap",
- "reqwest 0.12.28",
- "rmcp",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "wiremock",
-]
-
-[[package]]
-name = "h_agent_memory"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "h_agent_core",
- "h_agent_store",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tracing",
-]
-
-[[package]]
-name = "h_agent_safety"
-version = "0.2.0"
-dependencies = [
- "dunce",
- "h_agent_core",
- "proptest",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "h_agent_sandbox"
-version = "0.2.0"
-dependencies = [
- "landlock",
-]
-
-[[package]]
-name = "h_agent_store"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "crc32fast",
- "dirs",
- "dunce",
- "h_agent_core",
- "postcard",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "zstd",
-]
-
-[[package]]
-name = "h_agent_tools"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "chromiumoxide",
- "dunce",
- "futures",
- "globset",
- "h_agent_core",
- "h_agent_safety",
- "h_agent_sandbox",
- "h_agent_store",
- "ignore",
- "process-wrap",
- "regex",
- "reqwest 0.12.28",
- "scraper",
- "serde",
- "serde_json",
- "similar",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "wiremock",
-]
-
-[[package]]
-name = "h_agent_tui"
-version = "0.2.0"
-dependencies = [
- "crossterm",
- "futures",
- "h_agent_core",
- "insta",
- "ratatui",
- "tokio",
- "tui-textarea",
 ]
 
 [[package]]

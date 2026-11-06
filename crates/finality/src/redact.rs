@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 
-use h_agent_core::secrets::redact;
+use finality_core::secrets::redact;
 use tracing_subscriber::fmt::MakeWriter;
 
 /// Wraps a [`MakeWriter`] so every write is passed through [`redact`].

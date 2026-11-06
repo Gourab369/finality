@@ -10,14 +10,10 @@ env:
 
 jobs:
   check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      # Installs the toolchain pinned in rust-toolchain.toml (`rustup show` no longer does rustup 1.28).
+      # Installs the toolchain pinned in rust-toolchain.toml (`rustup show` no longer does since rustup 1.28).
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
@@ -27,7 +23,7 @@ jobs:
 
   # The README promises `rust-version`; the pinned toolchain alone would not catch a regression.
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89
@@ -35,9 +31,10 @@ jobs:
       - run: cargo +1.89 check --all-targets --locked
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: taiki-e/install-action@v2
         with:
-          command: check advisories licenses bans sources
+          tool: cargo-deny
+      - run: cargo deny check advisories licenses bans sources

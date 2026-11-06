@@ -1,0 +1,39 @@
+[package]
+name = "finality_tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+finality_core.workspace = true
+finality_safety.workspace = true
+finality_sandbox.workspace = true
+finality_store.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+chromiumoxide.workspace = true
+futures.workspace = true
+globset.workspace = true
+ignore.workspace = true
+process-wrap.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+scraper.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+dunce.workspace = true
+tempfile.workspace = true
+wiremock.workspace = true
+
+[lints]
+workspace = true

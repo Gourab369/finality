@@ -1,0 +1,33 @@
+[package]
+name = "finality_agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+finality_core.workspace = true
+finality_store.workspace = true
+finality_llm.workspace = true
+finality_safety.workspace = true
+finality_sandbox.workspace = true
+finality_tools.workspace = true
+finality_mcp.workspace = true
+finality_memory.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+dunce.workspace = true
+tempfile.workspace = true
+wiremock.workspace = true
+
+[lints]
+workspace = true

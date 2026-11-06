@@ -11,16 +11,16 @@ name = "finality"
 path = "src/main.rs"
 
 [dependencies]
-h_agent_core.workspace = true
-h_agent_store.workspace = true
-h_agent_llm.workspace = true
-h_agent_safety.workspace = true
-h_agent_sandbox.workspace = true
-h_agent_tools.workspace = true
-h_agent_mcp.workspace = true
-h_agent_memory.workspace = true
-h_agent_agents.workspace = true
-h_agent_tui.workspace = true
+finality_core.workspace = true
+finality_store.workspace = true
+finality_llm.workspace = true
+finality_safety.workspace = true
+finality_sandbox.workspace = true
+finality_tools.workspace = true
+finality_mcp.workspace = true
+finality_memory.workspace = true
+finality_agents.workspace = true
+finality_tui.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true

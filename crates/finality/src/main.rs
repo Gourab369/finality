@@ -6,14 +6,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use h_agent_agents::{Core, CoreDeps};
-use h_agent_core::Workspace;
-use h_agent_core::config::{ConfigLoader, ENV_PREFIX};
-use h_agent_core::events::{CoreCommand, SlashCommand};
-use h_agent_llm::OllamaProvider;
-use h_agent_store::DataDir;
-use h_agent_store::paths::HOME_ENV;
-use h_agent_tui::App;
+use finality_agents::{Core, CoreDeps};
+use finality_core::Workspace;
+use finality_core::config::{ConfigLoader, ENV_PREFIX};
+use finality_core::events::{CoreCommand, SlashCommand};
+use finality_llm::OllamaProvider;
+use finality_store::DataDir;
+use finality_store::paths::HOME_ENV;
+use finality_tui::App;
 use tokio::sync::mpsc;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -29,9 +29,9 @@ fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
     if args
         .next()
-        .is_some_and(|a| a == h_agent_sandbox::LAUNCHER_ARG)
+        .is_some_and(|a| a == finality_sandbox::LAUNCHER_ARG)
     {
-        std::process::exit(h_agent_sandbox::launcher_main(args.collect()));
+        std::process::exit(finality_sandbox::launcher_main(args.collect()));
     }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -86,6 +86,9 @@ async fn run() -> Result<()> {
         core.choose_model_at_start();
     }
     let mut app = App::new(core.status().clone());
+    if cli.direct {
+        cmd_tx.send(CoreCommand::Slash(SlashCommand::Direct(Some(true))))?;
+    }
     if let Some(id) = cli.resume {
         cmd_tx.send(CoreCommand::Slash(SlashCommand::Resume {
             id: Some(id.to_string()),
@@ -95,7 +98,7 @@ async fn run() -> Result<()> {
         cmd_tx.send(app.prompt(&prompt))?;
     }
     let core = tokio::spawn(core.run(cmd_rx));
-    let ui_result = h_agent_tui::run(app, ui_rx, cmd_tx).await;
+    let ui_result = finality_tui::run(app, ui_rx, cmd_tx).await;
     // The UI has dropped its command sender; the core closes the session and exits.
     if tokio::time::timeout(SHUTDOWN_WAIT, core).await.is_err() {
         tracing::warn!("core did not shut down in time");
@@ -107,13 +110,13 @@ async fn run() -> Result<()> {
 fn init_tracing(data_dir: &DataDir) -> Result<WorkerGuard> {
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
-        .filename_prefix("h_agent")
+        .filename_prefix("finality")
         .filename_suffix("log")
         .max_log_files(7)
         .build(data_dir.logs_dir())
         .context("cannot open log file")?;
     let (writer, guard) = tracing_appender::non_blocking(appender);
-    let filter = EnvFilter::try_from_env("H_AGENT_LOG")
+    let filter = EnvFilter::try_from_env("FINALITY_LOG")
         .or_else(|_| EnvFilter::try_from_default_env())
         .unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
@@ -127,8 +130,8 @@ fn init_tracing(data_dir: &DataDir) -> Result<WorkerGuard> {
 /// Restores the terminal and logs panics; the message printed to stderr is redacted like the log.
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
-        h_agent_tui::restore_terminal();
+        finality_tui::restore_terminal();
         tracing::error!(panic = %info, "panic");
-        eprintln!("{}", h_agent_core::secrets::redact(&info.to_string()));
+        eprintln!("{}", finality_core::secrets::redact(&info.to_string()));
     }));
 }
