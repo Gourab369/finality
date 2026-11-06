@@ -23,7 +23,7 @@ The library crates, environment variables (`H_AGENT_*`) and the data directory (
 
 ### Pre-built binaries (recommended)
 
-Download the archive for your system from the [Releases](https://github.com/<owner>/finality/releases) page:
+Download the archive for your system from the [Releases](https://github.com/Gourab369/finality/releases) page:
 
 | System | Archive |
 |---|---|
@@ -45,7 +45,7 @@ may block it until you run `xattr -d com.apple.quarantine finality`.
 ### From source
 
 ```sh
-cargo install --git https://github.com/<owner>/finality --tag v0.2.0 --locked finality
+cargo install --git https://github.com/Gourab369/finality --tag v0.2.0 --locked finality
 # or, in a clone of the repository:
 cargo install --path crates/finality --locked
 ```

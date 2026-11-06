@@ -17,8 +17,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml pins the version; rustup installs it on first use.
-      - run: rustup show
+      # Installs the toolchain pinned in rust-toolchain.toml (`rustup show` no longer does rustup 1.28).
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
