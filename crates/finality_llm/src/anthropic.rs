@@ -234,10 +234,18 @@ pub(crate) fn build_body(req: &ChatRequest, max_tokens: u32, signatures: &Signat
                 "user",
                 vec![json!({ "type": "text", "text": format!("System note:\n{content}") })],
             ),
-            Message::User { content } => push_blocks(
+            Message::User { content, images } => push_blocks(
                 &mut messages,
                 "user",
-                vec![json!({ "type": "text", "text": content })],
+                images
+                    .iter()
+                    .map(|img| {
+                        json!({ "type": "image", "source": {
+                            "type": "base64", "media_type": img.media_type, "data": img.base64
+                        }})
+                    })
+                    .chain([json!({ "type": "text", "text": content })])
+                    .collect(),
             ),
             Message::Assistant {
                 content,
@@ -292,14 +300,32 @@ pub(crate) fn build_body(req: &ChatRequest, max_tokens: u32, signatures: &Signat
         "stream": true,
     });
     if !system.is_empty() {
-        body["system"] = json!(system.join("\n\n"));
+        // Prompt caching: tools, the system prompt and the conversation so far are reused by the next request.
+        body["system"] = json!([{
+            "type": "text",
+            "text": system.join("\n\n"),
+            "cache_control": { "type": "ephemeral" }
+        }]);
     }
     if !req.tools.is_empty() {
-        body["tools"] = req
+        let mut tools: Vec<Value> = req
             .tools
             .iter()
             .map(|t| json!({ "name": t.name, "description": t.description, "input_schema": t.parameters }))
             .collect();
+        if let Some(last) = tools.last_mut() {
+            last["cache_control"] = json!({ "type": "ephemeral" });
+        }
+        body["tools"] = Value::Array(tools);
+    }
+    if let Some(block) = body["messages"]
+        .as_array_mut()
+        .and_then(|m| m.last_mut())
+        .and_then(|m| m["content"].as_array_mut())
+        .and_then(|c| c.last_mut())
+        .filter(|b| b["type"] != "thinking")
+    {
+        block["cache_control"] = json!({ "type": "ephemeral" });
     }
     match budget {
         Some(budget) => {
@@ -542,7 +568,8 @@ mod tests {
         }];
         req.temperature = Some(0.2);
         let body = build_body(&req, 8192, &Signatures::default());
-        assert_eq!(body["system"], "You are finality.");
+        assert_eq!(body["system"][0]["text"], "You are finality.");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(body["max_tokens"], 8192);
         assert_eq!(body["temperature"], 0.2);
         let msgs = body["messages"].as_array().unwrap();
@@ -561,12 +588,15 @@ mod tests {
         );
         assert_eq!(
             msgs[2]["content"][0],
-            json!({ "type": "tool_result", "tool_use_id": "toolu_1", "content": "contents" })
+            json!({ "type": "tool_result", "tool_use_id": "toolu_1", "content": "contents",
+                    "cache_control": { "type": "ephemeral" } }),
+            "the conversation so far is cached"
         );
         assert_eq!(
             body["tools"][0]["input_schema"],
             json!({ "type": "object" })
         );
+        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]

@@ -19,13 +19,35 @@ pub fn resolve_model(cfg: &Config, role: Role) -> ModelRef {
         Role::Learner => &cfg.models.learner,
     }
     .trim();
-
     if configured.is_empty() {
         return ModelRef {
             provider: default,
             model: cfg.provider.model_for(default).to_owned(),
         };
     }
+    parse_ref(cfg, configured)
+}
+
+/// The triage model: `models.triage`, else a pinned `models.memory`, else the orchestrator's. A model other than the
+/// orchestrator's keeps triage from evicting the orchestrator's prompt cache on local servers. The memory model is
+/// skipped on llama.cpp, which loads one model at a time and would switch models every turn.
+pub fn resolve_triage(cfg: &Config) -> ModelRef {
+    let triage = cfg.models.triage.trim();
+    if !triage.is_empty() {
+        return parse_ref(cfg, triage);
+    }
+    let memory = cfg.models.memory.trim();
+    if !memory.is_empty() {
+        let r = parse_ref(cfg, memory);
+        if r.provider != ProviderKind::LlamaCpp {
+            return r;
+        }
+    }
+    resolve_model(cfg, Role::Orchestrator)
+}
+
+fn parse_ref(cfg: &Config, configured: &str) -> ModelRef {
+    let default = cfg.provider.default;
     // Ollama tags contain ':' too ("qwen3:8b"), so only a known provider prefix is split off.
     if let Some((prefix, model)) = configured.split_once(':')
         && let Ok(provider) = prefix.parse::<ProviderKind>()
@@ -45,6 +67,29 @@ pub fn resolve_model(cfg: &Config, role: Role) -> ModelRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn triage_prefers_its_own_then_the_memory_model() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            resolve_triage(&cfg),
+            resolve_model(&cfg, Role::Orchestrator)
+        );
+        cfg.models.memory = "llamacpp:small.gguf".into();
+        assert_eq!(
+            resolve_triage(&cfg),
+            resolve_model(&cfg, Role::Orchestrator),
+            "llama.cpp would swap models every turn"
+        );
+        cfg.models.memory = "qwen3:4b".into();
+        assert_eq!(resolve_triage(&cfg).model, "qwen3:4b");
+        cfg.models.triage = "anthropic:claude-haiku-4-5".into();
+        let t = resolve_triage(&cfg);
+        assert_eq!(
+            (t.provider, t.model.as_str()),
+            (ProviderKind::Anthropic, "claude-haiku-4-5")
+        );
+    }
 
     #[test]
     fn falls_back_to_default_provider_model() {

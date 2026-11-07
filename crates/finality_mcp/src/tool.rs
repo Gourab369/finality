@@ -1,4 +1,5 @@
-//! MCP tools as deferred, External-risk registry tools named `mcp__<server>__<tool>`.
+//! MCP tools as deferred registry tools named `mcp__<server>__<tool>`: External risk, or Read for tools annotated
+//! `readOnlyHint` on servers whose hints the user trusts.
 
 use std::sync::{Arc, Weak};
 
@@ -68,6 +69,7 @@ pub struct McpTool {
     name: String,
     description: String,
     schema: Value,
+    read_only: bool,
 }
 
 impl McpTool {
@@ -95,6 +97,12 @@ impl McpTool {
             name,
             description,
             schema,
+            read_only: server.def.read_only_hints
+                && tool
+                    .annotations
+                    .get("readOnlyHint")
+                    .and_then(Value::as_bool)
+                    == Some(true),
         }
     }
 }
@@ -161,7 +169,11 @@ impl Tool for McpTool {
     }
 
     fn risk(&self) -> RiskClass {
-        RiskClass::External
+        if self.read_only {
+            RiskClass::Read
+        } else {
+            RiskClass::External
+        }
     }
 
     fn tier(&self) -> Tier {

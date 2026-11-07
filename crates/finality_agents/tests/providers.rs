@@ -53,7 +53,7 @@ impl Respond for Recorded {
             ProviderKind::OpenAi if body.get("response_format").is_some() => "triage",
             ProviderKind::OpenAi if last["role"] == "tool" => "answer",
             ProviderKind::OpenAi => "tool_call",
-            _ if body["system"]
+            _ if body["system"][0]["text"]
                 .as_str()
                 .unwrap_or("")
                 .contains("Reply with only a JSON object") =>
@@ -147,6 +147,9 @@ fn start(config: Config, local: Arc<Local>, keys: StaticKeys) -> Run {
     std::fs::write(work.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
     let data = DataDir::new(root.join("data"));
     data.ensure().unwrap();
+    // Scripted providers expect a triage request for every prompt.
+    let mut config = config;
+    config.llm.quick_triage = false;
     let deps = CoreDeps {
         config,
         workspace: Workspace::from_dir(&work).unwrap(),
@@ -338,7 +341,7 @@ async fn anthropic_runs_the_agent_turn() {
     check_turn(&events, 266 + 498 + 620, 200_000);
     assert_eq!(bodies.len(), 3);
     assert!(
-        bodies[1]["system"]
+        bodies[1]["system"][0]["text"]
             .as_str()
             .unwrap()
             .starts_with("You are Finality")

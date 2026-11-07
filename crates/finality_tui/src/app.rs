@@ -30,6 +30,7 @@ const AGENTS_PANEL_MIN_TERMINAL: u16 = 80;
 /// Task rows in the plan box; finished tasks give way when there are more.
 const MAX_STRIP_TASKS: usize = 5;
 const MAX_PICKER_ROWS: usize = 15;
+const MENTION_ROWS: usize = 8;
 /// Modals (approvals, questions, pickers) get their own background so they stand apart from the chat.
 const MODAL: Style = Style::new().fg(Color::White).bg(Color::Indexed(236));
 /// Prompts and answers are brighter than thinking, tool lines and notices.
@@ -86,8 +87,14 @@ pub struct App {
     answer_text: String,
     picker: Option<PickerPrompt>,
     skills: Vec<SkillInfo>,
+    /// Paths for `@`-mention completion.
+    files: Vec<String>,
+    /// Where pasted clipboard images are saved; `None` disables image paste.
+    attachments_dir: Option<std::path::PathBuf>,
     decide: bool,
     direct: bool,
+    /// Set after quitting while the core saves the session; the text is its current step.
+    closing: Option<String>,
 }
 
 fn new_input(lines: Vec<String>) -> TextArea<'static> {
@@ -135,13 +142,52 @@ impl App {
             answer_text: String::new(),
             picker: None,
             skills: Vec::new(),
+            files: Vec::new(),
+            attachments_dir: None,
             decide: false,
             direct: false,
+            closing: None,
         }
     }
 
     pub fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    /// Enables pasting clipboard images (Alt+V), saved as PNG files in `dir`.
+    pub fn set_attachments_dir(&mut self, dir: std::path::PathBuf) {
+        self.attachments_dir = Some(dir);
+    }
+
+    /// `text_fallback`: paste the clipboard's text when it holds no image (Ctrl+V).
+    fn paste_image(&mut self, text_fallback: bool) {
+        let Some(dir) = self.attachments_dir.clone() else {
+            return self.notice(NoticeLevel::Warning, "image paste is not available");
+        };
+        match crate::clipboard::save_clipboard_image(&dir) {
+            Ok(path) => {
+                self.input
+                    .insert_str(format!("{} ", crate::clipboard::marker(&path)));
+            }
+            Err(e) => match crate::clipboard::text().filter(|_| text_fallback) {
+                Some(text) => {
+                    self.handle_terminal_event(Event::Paste(text), Instant::now());
+                }
+                None => self.notice(NoticeLevel::Warning, format!("cannot paste an image: {e}")),
+            },
+        }
+    }
+
+    /// Quitting was requested and the core is still saving the session.
+    pub fn is_closing(&self) -> bool {
+        self.closing.is_some()
+    }
+
+    fn begin_closing(&mut self) -> Vec<CoreCommand> {
+        if self.closing.is_none() {
+            self.closing = Some("Closing…".into());
+        }
+        vec![CoreCommand::Quit]
     }
 
     /// Whether an approval modal is open.
@@ -157,7 +203,7 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        if self.busy {
+        if self.busy || self.closing.is_some() {
             self.spinner = (self.spinner + 1) % SPINNER.len();
         }
     }
@@ -194,6 +240,44 @@ impl App {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The `@word` being typed before the cursor, without the `@`.
+    fn mention_query(&self) -> Option<String> {
+        let (row, col) = self.input.cursor();
+        let line = self.input.lines().get(row)?;
+        let before: String = line.chars().take(col).collect();
+        let word = before.rsplit(char::is_whitespace).next()?;
+        word.strip_prefix('@').map(str::to_owned)
+    }
+
+    /// Paths matching the `@word` before the cursor: file names starting with it first, then any path
+    /// containing it.
+    fn mention_matches(&self) -> Vec<String> {
+        let Some(query) = self.mention_query() else {
+            return Vec::new();
+        };
+        let q = query.to_lowercase();
+        let mut hits: Vec<(u8, &String)> = self
+            .files
+            .iter()
+            .filter_map(|p| {
+                let lower = p.to_lowercase();
+                let name = lower.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+                if name.starts_with(&q) {
+                    Some((0, p))
+                } else if lower.contains(&q) {
+                    Some((1, p))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        hits.sort_by_key(|(rank, p)| (*rank, p.len()));
+        hits.into_iter()
+            .take(MENTION_ROWS)
+            .map(|(_, p)| p.clone())
+            .collect()
     }
 
     // ------------------------------------------------------------------ events from the core
@@ -273,6 +357,7 @@ impl App {
                 }
             }
             UiEvent::Skills(skills) => self.skills = skills,
+            UiEvent::Files(files) => self.files = files,
             UiEvent::DecideChanged { on } => self.decide = on,
             UiEvent::DirectChanged { on } => self.direct = on,
             UiEvent::Picker(mut p) if !p.items.is_empty() => {
@@ -280,6 +365,8 @@ impl App {
                 self.picker = Some(p);
             }
             UiEvent::Picker(_) => {}
+            UiEvent::ShuttingDown { step } => self.closing = Some(step),
+            UiEvent::ShutdownComplete => self.quit = true,
         }
     }
 
@@ -323,12 +410,16 @@ impl App {
     pub fn handle_terminal_event(&mut self, event: Event, now: Instant) -> Vec<CoreCommand> {
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key, now),
+            Event::Paste(_) if self.closing.is_some() => Vec::new(),
             Event::Paste(text) => {
                 if let Some(note) = &mut self.note {
                     note.text.push_str(&text.replace(['\r', '\n'], " "));
                 } else if !self.approvals.is_empty() || self.picker.is_some() {
                 } else if !self.questions.is_empty() {
                     self.answer_text.push_str(&text.replace(['\r', '\n'], " "));
+                } else if let Some(path) = crate::clipboard::pasted_image_path(&text) {
+                    self.input
+                        .insert_str(format!("{} ", crate::clipboard::marker(&path)));
                 } else {
                     self.input.insert_str(text.replace("\r\n", "\n"));
                 }
@@ -348,6 +439,13 @@ impl App {
 
     pub fn handle_key(&mut self, key: KeyEvent, now: Instant) -> Vec<CoreCommand> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.closing.is_some() {
+            // Ctrl+C leaves without waiting; the next start finishes the session summary.
+            if ctrl && key.code == KeyCode::Char('c') {
+                self.quit = true;
+            }
+            return Vec::new();
+        }
         if ctrl && key.code == KeyCode::Char('c') {
             return self.ctrl_c(now);
         }
@@ -362,6 +460,12 @@ impl App {
         }
         if ctrl && key.code == KeyCode::Char('o') {
             self.show_details = !self.show_details;
+            return Vec::new();
+        }
+        // Terminals usually turn Ctrl+V into a text paste and drop it when the clipboard holds an image,
+        // so Alt+V is the dependable key.
+        if key.code == KeyCode::Char('v') && (ctrl || key.modifiers.contains(KeyModifiers::ALT)) {
+            self.paste_image(ctrl);
             return Vec::new();
         }
 
@@ -385,6 +489,33 @@ impl App {
                 }
                 KeyCode::Esc => {
                     self.set_input("");
+                    return Vec::new();
+                }
+                _ => {}
+            }
+        }
+
+        let mentions = self.mention_matches();
+        if !mentions.is_empty() {
+            match key.code {
+                KeyCode::Tab => {
+                    let pick = &mentions[self.completion.min(mentions.len() - 1)];
+                    let typed = self.mention_query().unwrap_or_default().chars().count();
+                    for _ in 0..typed {
+                        self.input.delete_char();
+                    }
+                    // A folder stays open for completing a path inside it.
+                    let tail = if pick.ends_with('/') { "" } else { " " };
+                    self.input.insert_str(format!("{pick}{tail}"));
+                    self.completion = 0;
+                    return Vec::new();
+                }
+                KeyCode::Up => {
+                    self.completion = self.completion.checked_sub(1).unwrap_or(mentions.len() - 1);
+                    return Vec::new();
+                }
+                KeyCode::Down => {
+                    self.completion = (self.completion + 1) % mentions.len();
                     return Vec::new();
                 }
                 _ => {}
@@ -464,8 +595,7 @@ impl App {
             .last_ctrl_c
             .is_some_and(|t| now.duration_since(t) <= QUIT_WINDOW)
         {
-            self.quit = true;
-            return vec![CoreCommand::Quit];
+            return self.begin_closing();
         }
         self.last_ctrl_c = Some(now);
         self.notice(NoticeLevel::Info, "press Ctrl+C again to quit");
@@ -501,10 +631,7 @@ impl App {
                 self.notice(NoticeLevel::Info, help_text(&self.skills));
                 Vec::new()
             }
-            Ok(SlashAction::Quit) => {
-                self.quit = true;
-                vec![CoreCommand::Quit]
-            }
+            Ok(SlashAction::Quit) => self.begin_closing(),
             Ok(SlashAction::Agents) => {
                 self.notice(NoticeLevel::Info, self.agents_text());
                 Vec::new()
@@ -794,7 +921,22 @@ impl App {
                 self.completion.min(matches.len() - 1),
             );
         }
-        if let Some(prompt) = self.approvals.front() {
+        let mentions = self.mention_matches();
+        if !mentions.is_empty()
+            && self.approvals.is_empty()
+            && self.questions.is_empty()
+            && self.picker.is_none()
+        {
+            render_mentions(
+                frame,
+                chat,
+                &mentions,
+                self.completion.min(mentions.len() - 1),
+            );
+        }
+        if let Some(step) = &self.closing {
+            render_closing(frame, frame.area(), SPINNER[self.spinner], step);
+        } else if let Some(prompt) = self.approvals.front() {
             self.render_approval(frame, chat, prompt);
         } else if let Some(q) = self.questions.front() {
             self.render_question(frame, chat, q);
@@ -938,7 +1080,10 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ),
             sep(),
-            Span::raw(s.workdir.clone()),
+            Span::raw(match &s.branch {
+                Some(b) => format!("{} ({b})", s.workdir),
+                None => s.workdir.clone(),
+            }),
             sep(),
             Span::raw(session),
             sep(),
@@ -1375,6 +1520,74 @@ fn render_completion(
     );
 }
 
+fn render_mentions(frame: &mut Frame<'_>, chat: Rect, paths: &[String], selected: usize) {
+    let height = (paths.len() as u16 + 2).min(chat.height);
+    let width = chat.width.min(70);
+    let rect = Rect {
+        x: chat.x,
+        y: chat.y + chat.height - height,
+        width,
+        height,
+    };
+    let lines: Vec<Line<'static>> = paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let style = if i == selected {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Line::styled(format!(" @{p}"), style.fg(Color::Cyan))
+        })
+        .collect();
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" Tab attach · ↑↓ select ")),
+        rect,
+    );
+}
+
+fn render_closing(frame: &mut Frame<'_>, area: Rect, spinner: &str, step: &str) {
+    let width = area.width.saturating_sub(4).min(72);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(format!("{spinner} "), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                step.to_owned(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::default(),
+        Line::styled(
+            "Ctrl+C quits now; the summary is then finished the next time Finality starts.",
+            Style::default().fg(Color::Gray),
+        ),
+    ];
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    let rows: usize = lines.iter().map(|l| l.width().div_ceil(inner).max(1)).sum();
+    let height = (u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2)).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let block = Block::bordered()
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(format!(" Quitting {} ", finality_core::APP_NAME));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(MODAL)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        rect,
+    );
+}
+
 fn render_picker(frame: &mut Frame<'_>, area: Rect, p: &PickerPrompt) {
     let width = area.width.saturating_sub(4).min(100);
     let inner = usize::from(width.saturating_sub(2));
@@ -1448,7 +1661,7 @@ fn help_text(skills: &[SkillInfo]) -> String {
     }
     out.push_str(
         "\nkeys: Enter send · Shift/Alt+Enter newline · ↑↓ history · PgUp/PgDn scroll · Ctrl+O details · \
-         Tab agents panel · Ctrl+C cancel (twice to quit)",
+         Tab agents panel · Alt+V paste image · @path attach a file · Ctrl+C cancel (twice to quit)",
     );
     out
 }

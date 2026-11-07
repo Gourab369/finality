@@ -38,6 +38,7 @@ pub struct Config {
     pub safety: SafetyConfig,
     pub web: WebConfig,
     pub browser: BrowserConfig,
+    pub godot: GodotConfig,
     pub mcp: McpConfig,
     pub decision: DecisionConfig,
     pub scorer: ScorerConfig,
@@ -200,6 +201,8 @@ pub struct ModelsConfig {
     pub memory: String,
     pub scorer: String,
     pub learner: String,
+    /// Empty: `memory` when pinned, else the orchestrator's model.
+    pub triage: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -207,6 +210,8 @@ pub struct ModelsConfig {
 pub struct LlmConfig {
     pub max_concurrent_requests: u32,
     pub request_timeout_secs: u64,
+    /// Classify obviously simple messages (greetings, short questions and commands) without a triage request.
+    pub quick_triage: bool,
 }
 
 impl Default for LlmConfig {
@@ -214,6 +219,7 @@ impl Default for LlmConfig {
         Self {
             max_concurrent_requests: 2,
             request_timeout_secs: 300,
+            quick_triage: true,
         }
     }
 }
@@ -273,6 +279,8 @@ pub struct MemoryConfig {
     pub subagent_exchange_trigger: u32,
     pub compaction_threshold: f64,
     pub digest_token_budget: u32,
+    /// How long quitting waits for the Memory agent to summarize the session into events.
+    pub quit_wait_secs: u64,
 }
 
 impl Default for MemoryConfig {
@@ -282,6 +290,7 @@ impl Default for MemoryConfig {
             subagent_exchange_trigger: 10,
             compaction_threshold: 0.80,
             digest_token_budget: 1500,
+            quit_wait_secs: 300,
         }
     }
 }
@@ -361,7 +370,10 @@ impl Default for SafetyConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchBackend {
+    /// Tavily when a key is available, else DuckDuckGo; Tavily errors fall back to DuckDuckGo.
     #[default]
+    Auto,
+    Tavily,
     DuckDuckGo,
     SearXng,
 }
@@ -371,6 +383,8 @@ pub enum SearchBackend {
 pub struct WebConfig {
     pub search_backend: SearchBackend,
     pub searxng_url: String,
+    /// Environment variable with the Tavily API key; else the OS keyring (service `finality`, user `api-key:tavily`).
+    pub tavily_api_key_env: String,
     pub allow_private_network: bool,
     pub user_agent: String,
 }
@@ -378,8 +392,9 @@ pub struct WebConfig {
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
-            search_backend: SearchBackend::DuckDuckGo,
+            search_backend: SearchBackend::Auto,
             searxng_url: String::new(),
+            tavily_api_key_env: "TAVILY_API_KEY".into(),
             allow_private_network: false,
             user_agent: format!("{}/{}", crate::APP_NAME, env!("CARGO_PKG_VERSION")),
         }
@@ -398,6 +413,24 @@ impl Default for BrowserConfig {
         Self {
             chrome_path: String::new(),
             headless: true,
+        }
+    }
+}
+
+/// The `godot` tool, offered when the working directory holds a Godot project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GodotConfig {
+    pub enabled: bool,
+    /// The editor's GDScript language server (Editor Settings → Network → Language Server).
+    pub lsp_port: u16,
+}
+
+impl Default for GodotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            lsp_port: 6005,
         }
     }
 }

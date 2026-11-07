@@ -109,6 +109,7 @@ impl ToolExecutor {
             command: preview.command.clone(),
             shapes: preview.shapes.clone(),
             always_ask: preview.always_ask.clone(),
+            deletes: preview.deletes,
             grant_keys: preview.grant_keys.clone(),
         };
         let decision = match self.permissions.lock() {

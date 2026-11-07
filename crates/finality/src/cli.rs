@@ -12,7 +12,7 @@ pub struct Cli {
     #[arg(trailing_var_arg = true)]
     pub prompt: Vec<String>,
 
-    /// plan | cowork | auto-edit | auto
+    /// plan | cowork | auto
     #[arg(long, value_parser = parse::<Mode>)]
     pub mode: Option<Mode>,
 
@@ -69,7 +69,7 @@ impl Cli {
     /// Applies the CLI layer, the highest-precedence config source.
     pub fn apply_to(&self, cfg: &mut Config) {
         if let Some(mode) = self.mode {
-            cfg.general.default_mode = mode;
+            cfg.general.default_mode = mode.canonical();
         }
         if let Some(provider) = self.provider {
             cfg.provider.default = provider;
@@ -127,7 +127,11 @@ mod tests {
             cfg.provider.ollama.model,
             Config::default().provider.ollama.model
         );
-        assert_eq!(cfg.general.default_mode, Mode::AutoEdit);
+        assert_eq!(
+            cfg.general.default_mode,
+            Mode::Cowork,
+            "auto-edit is now cowork"
+        );
         assert_eq!(cfg.agents.max_subagents, 6);
         assert!(!cfg.mcp.enabled);
         assert_eq!(cli.initial_prompt().as_deref(), Some("fix the bug"));

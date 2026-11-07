@@ -64,7 +64,7 @@ fn last_user(req: &ChatRequest) -> &str {
         .iter()
         .rev()
         .find_map(|m| match m {
-            Message::User { content } => Some(content.as_str()),
+            Message::User { content, .. } => Some(content.as_str()),
             _ => None,
         })
         .unwrap_or("")
@@ -199,6 +199,9 @@ fn start(
         )
         .unwrap();
     }
+    // Scripted providers expect a triage request for every prompt.
+    let mut config = config;
+    config.llm.quick_triage = false;
     let deps = CoreDeps {
         config,
         workspace: Workspace::from_dir(&work).unwrap(),
@@ -323,11 +326,11 @@ async fn mcp_tool_is_found_by_tool_search_and_runs_after_approval() {
 
     run.turn("check the docs for deploy").await;
     let reqs = provider.orchestrator_requests();
-    assert!(
-        reqs[0].messages[0]
-            .content()
-            .contains("MCP servers whose tools tool_search can also find: docs")
-    );
+    assert!(reqs[0].messages.iter().any(|m| matches!(
+        m,
+        Message::System { content }
+            if content.contains("MCP servers whose tools tool_search can also find: docs")
+    )));
     let results = turn_results(reqs.last().unwrap());
     assert!(
         results[0]

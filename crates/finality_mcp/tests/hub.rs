@@ -76,6 +76,7 @@ impl Fx {
             vault: self.vault.clone(),
             start_timeout: Duration::from_secs(20),
             call_timeout: Duration::from_secs(20),
+            ide_dir: Some(self.root.join("ide")),
         })
     }
 
@@ -303,6 +304,23 @@ async fn project_servers_need_trust() {
 }
 
 #[tokio::test]
+async fn tool_lists_limit_what_a_server_offers() {
+    let f = fx();
+    let mut entry = f.echo_entry();
+    entry["tools"] = json!(["ECHO", "add", "missing"]);
+    f.global(json!({ "echo": entry }));
+    let hub = f.hub();
+    hub.enable(&BTreeMap::new());
+    assert!(hub.discover(&CancellationToken::new()).await.is_empty());
+    assert_eq!(
+        names(&hub.tools()),
+        ["mcp__echo__add", "mcp__echo__echo"],
+        "`fail` is not listed"
+    );
+    hub.shutdown().await;
+}
+
+#[tokio::test]
 async fn broken_servers_are_reported_and_not_retried() {
     let f = fx();
     f.global(json!({
@@ -336,6 +354,8 @@ async fn broken_servers_are_reported_and_not_retried() {
 /// Streamable HTTP MCP endpoint answering JSON. Optionally requires a bearer token.
 struct HttpMcp {
     token: Option<&'static str>,
+    /// `lookup` declares `readOnlyHint`.
+    annotated: bool,
 }
 
 impl Respond for HttpMcp {
@@ -369,6 +389,11 @@ impl Respond for HttpMcp {
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "docs", "version": "1" }
             }),
+            "tools/list" if self.annotated => json!({ "tools": [
+                { "name": "lookup", "description": "Look up docs", "inputSchema": { "type": "object" },
+                  "annotations": { "readOnlyHint": true } },
+                { "name": "publish", "description": "Publish docs", "inputSchema": { "type": "object" } }
+            ] }),
             "tools/list" => json!({ "tools": [
                 { "name": "lookup", "description": "Look up docs", "inputSchema": { "type": "object" } }
             ] }),
@@ -383,10 +408,58 @@ impl Respond for HttpMcp {
 }
 
 #[tokio::test]
+async fn editor_bridge_is_found_by_its_lock_file_and_read_only_tools_are_reads() {
+    let server = MockServer::start().await;
+    Mock::given(path("/mcp"))
+        .respond_with(HttpMcp {
+            token: Some("ide-token"),
+            annotated: true,
+        })
+        .mount(&server)
+        .await;
+    let f = fx();
+    let ide = f.root.join("ide");
+    std::fs::create_dir_all(&ide).unwrap();
+    let hub = f.hub();
+    hub.enable(&BTreeMap::new());
+    assert_eq!(hub.undiscovered(), ["vscode"]);
+    let problems = hub.discover(&CancellationToken::new()).await;
+    assert!(problems[0].contains("no VS Code window"), "{problems:?}");
+    assert_eq!(
+        hub.undiscovered(),
+        ["vscode"],
+        "retried once the editor opens"
+    );
+
+    let port = server.address().port();
+    std::fs::write(
+        ide.join(format!("{port}.json")),
+        json!({ "port": port, "token": "ide-token", "workspaceFolders": [f.root.display().to_string()] })
+            .to_string(),
+    )
+    .unwrap();
+    assert!(hub.discover(&CancellationToken::new()).await.is_empty());
+    let tools = hub.tools();
+    let risk = |name: &str| tools.iter().find(|t| t.name() == name).unwrap().risk();
+    assert_eq!(risk("mcp__vscode__lookup"), finality_core::RiskClass::Read);
+    assert_eq!(
+        risk("mcp__vscode__publish"),
+        finality_core::RiskClass::External
+    );
+    let status = hub.status().await;
+    assert_eq!(status[0].target, "VS Code (Finality extension)");
+    assert!(!status[0].http, "no login for the editor");
+    hub.shutdown().await;
+}
+
+#[tokio::test]
 async fn http_servers_send_configured_headers() {
     let server = MockServer::start().await;
     Mock::given(path("/mcp"))
-        .respond_with(HttpMcp { token: None })
+        .respond_with(HttpMcp {
+            token: None,
+            annotated: false,
+        })
         .mount(&server)
         .await;
     let f = fx();
@@ -456,6 +529,7 @@ async fn login_stores_tokens_and_reconnects() {
     Mock::given(path("/mcp"))
         .respond_with(HttpMcp {
             token: Some("secret-token"),
+            annotated: false,
         })
         .mount(&server)
         .await;

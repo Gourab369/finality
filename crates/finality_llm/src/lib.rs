@@ -22,12 +22,12 @@ pub use error::LlmError;
 pub use keys::{ApiKeys, EnvOrKeyring, StaticKeys};
 pub use llamacpp::LlamaCppProvider;
 pub use mock::MockProvider;
-pub use models::{ModelRef, resolve_model};
+pub use models::{ModelRef, resolve_model, resolve_triage};
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 pub use provider::{ChatStream, CollectedResponse, LlmProvider, cancellable, collect};
 pub use retry::RetryPolicy;
 pub use router::{ModelSelector, ProviderRouter};
 pub use types::{
-    ChatChunk, ChatRequest, Message, ModelInfo, StopReason, ToolCall, ToolSchema, Usage,
+    ChatChunk, ChatRequest, ImageData, Message, ModelInfo, StopReason, ToolCall, ToolSchema, Usage,
 };

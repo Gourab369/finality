@@ -111,6 +111,8 @@ pub struct ActionRequest {
     pub shapes: Vec<CommandShape>,
     /// Set by tools whose action must be confirmed in every mode but plan; the reason shown to the user.
     pub always_ask: Option<String>,
+    /// The action deletes files; `cowork` asks for it even though it allows other writes.
+    pub deletes: bool,
     /// Keys for "allow for session"; empty means the tool name alone.
     pub grant_keys: Vec<String>,
 }
@@ -125,6 +127,7 @@ impl ActionRequest {
             command: None,
             shapes: Vec::new(),
             always_ask: None,
+            deletes: false,
             grant_keys: Vec::new(),
         }
     }
@@ -174,7 +177,7 @@ fn normalize(s: &str) -> String {
 impl PermissionEngine {
     pub fn new(mode: Mode, always_ask_patterns: &[String]) -> Self {
         Self {
-            mode,
+            mode: mode.canonical(),
             always_ask: always_ask_patterns
                 .iter()
                 .map(|p| normalize(p))
@@ -193,7 +196,7 @@ impl PermissionEngine {
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
-        self.mode = mode;
+        self.mode = mode.canonical();
     }
 
     /// Patterns match the normalized text (also with quotes removed) or the shape of any simple command.
@@ -261,10 +264,19 @@ impl PermissionEngine {
                 default_deny: true,
             });
         }
+        if self.mode != Mode::Auto && req.deletes {
+            let mut reasons = req.reasons.clone();
+            reasons.push("deletes files".into());
+            return Decision::Ask(AskInfo {
+                reasons,
+                allow_session: false,
+                default_deny: false,
+            });
+        }
         let automatic = match self.mode {
             Mode::Auto => true,
-            Mode::AutoEdit => matches!(req.risk, RiskClass::Read | RiskClass::Write),
-            Mode::Cowork | Mode::Plan => false,
+            Mode::Cowork | Mode::AutoEdit => matches!(req.risk, RiskClass::Read | RiskClass::Write),
+            Mode::Plan => false,
         };
         if automatic || req.keys().iter().all(|k| self.grants.contains(k)) {
             return Decision::Allow;
@@ -281,6 +293,7 @@ impl PermissionEngine {
         let grantable = req.location == Location::Inside
             && req.risk != RiskClass::Internal
             && self.mode != Mode::Plan
+            && !req.deletes
             && req.always_ask.is_none()
             && self.always_ask_match(req).is_none();
         if grantable {
@@ -314,13 +327,13 @@ mod tests {
         if location != Location::Inside {
             return if mode == Mode::Plan { Deny } else { Ask };
         }
-        match (mode, risk) {
+        match (mode.canonical(), risk) {
             (Mode::Plan, RiskClass::Read) => Allow,
             (Mode::Plan, _) => Deny,
+            (Mode::Cowork, RiskClass::Read | RiskClass::Write) => Allow,
             (Mode::Cowork, _) => Ask,
-            (Mode::AutoEdit, RiskClass::Read | RiskClass::Write) => Allow,
-            (Mode::AutoEdit, _) => Ask,
             (Mode::Auto, _) => Allow,
+            (Mode::AutoEdit, _) => unreachable!("canonical() maps auto-edit to cowork"),
         }
     }
 
@@ -355,6 +368,32 @@ mod tests {
             }
         }
         assert_eq!(checked, 4 * 7 * 3);
+    }
+
+    #[test]
+    fn cowork_asks_before_deleting_files() {
+        let delete = ActionRequest {
+            deletes: true,
+            ..ActionRequest::new("edit_file", RiskClass::Write, Location::Inside)
+        };
+        let mut cowork = PermissionEngine::new(Mode::AutoEdit, &[]);
+        assert_eq!(cowork.mode(), Mode::Cowork, "auto-edit is an alias");
+        assert!(matches!(
+            cowork.decide(&delete),
+            Decision::Ask(AskInfo {
+                allow_session: false,
+                ..
+            })
+        ));
+        assert!(!cowork.grant_session(&delete));
+        assert_eq!(
+            PermissionEngine::new(Mode::Auto, &[]).decide(&delete),
+            Decision::Allow
+        );
+        assert!(matches!(
+            PermissionEngine::new(Mode::Plan, &[]).decide(&delete),
+            Decision::Deny { .. }
+        ));
     }
 
     fn shell_req(cmd: &str, keys: &[&str]) -> ActionRequest {
@@ -504,9 +543,11 @@ mod tests {
         assert!(matches!(engine.decide(&outside), Decision::Ask(_)));
 
         let read = ActionRequest::new("read_file", RiskClass::Read, Location::Inside);
-        assert!(engine.grant_session(&read));
-        assert_eq!(engine.decide(&read), Decision::Allow);
+        assert_eq!(engine.decide(&read), Decision::Allow, "cowork reads freely");
+        let net = ActionRequest::new("web_fetch", RiskClass::Network, Location::Inside);
+        assert!(engine.grant_session(&net));
+        assert_eq!(engine.decide(&net), Decision::Allow);
         engine.clear_grants();
-        assert!(matches!(engine.decide(&read), Decision::Ask(_)));
+        assert!(matches!(engine.decide(&net), Decision::Ask(_)));
     }
 }

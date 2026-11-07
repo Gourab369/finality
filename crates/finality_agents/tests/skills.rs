@@ -72,7 +72,7 @@ fn last_user(req: &ChatRequest) -> &str {
         .iter()
         .rev()
         .find_map(|m| match m {
-            Message::User { content } => Some(content.as_str()),
+            Message::User { content, .. } => Some(content.as_str()),
             _ => None,
         })
         .unwrap_or("")
@@ -218,6 +218,9 @@ fn start(
     provider: Arc<dyn LlmProvider>,
     config: Config,
 ) -> Run {
+    // Scripted providers expect a triage request for every prompt.
+    let mut config = config;
+    config.llm.quick_triage = false;
     let deps = CoreDeps {
         config,
         workspace: Workspace::from_dir(&work).unwrap(),
@@ -297,6 +300,21 @@ fn no_worker(_: &ChatRequest) -> Reply {
     Reply::Text("unused".into())
 }
 
+/// The loadable-tools line of the latest tools note, which is kept out of the system prompt.
+fn loadable_line(r: &ChatRequest) -> Option<String> {
+    assert!(!r.messages[0].content().contains("More tools can be loaded"));
+    r.messages
+        .iter()
+        .rev()
+        .find(
+            |m| matches!(m, Message::System { content } if content.starts_with("[Loadable tools]")),
+        )?
+        .content()
+        .lines()
+        .find(|l| l.starts_with("More tools can be loaded with tool_search: "))
+        .map(str::to_owned)
+}
+
 #[tokio::test]
 async fn deferred_tool_loads_on_search_and_unloads_after_idle_turns() {
     let provider = Scripted::new(&[], weather_policy, no_worker);
@@ -318,12 +336,7 @@ async fn deferred_tool_loads_on_search_and_unloads_after_idle_turns() {
     assert_eq!(first.len(), 4);
     assert!(!has(first[0]), "absent until loaded");
     assert!(tool_names(first[0]).contains(&"tool_search"));
-    let loadable = first[0].messages[0]
-        .content()
-        .lines()
-        .find(|l| l.starts_with("More tools can be loaded with tool_search: "))
-        .unwrap()
-        .to_owned();
+    let loadable = loadable_line(first[0]).unwrap();
     assert!(
         loadable.contains("weather_lookup") && loadable.contains("web_fetch"),
         "{loadable}"
@@ -346,9 +359,7 @@ async fn deferred_tool_loads_on_search_and_unloads_after_idle_turns() {
     assert!(has(turn(2)) && has(turn(3)), "kept for 2 idle turns");
     assert!(!has(turn(4)), "unloaded after the idle turns");
     assert!(
-        turn(4).messages[0].content().lines().any(|l| l
-            .starts_with("More tools can be loaded with tool_search: ")
-            && l.contains("weather_lookup")),
+        loadable_line(turn(4)).is_some_and(|l| l.contains("weather_lookup")),
         "listed as loadable again"
     );
 
@@ -409,7 +420,7 @@ async fn skills_catalog_slash_invocation_load_and_review() {
     match skills {
         UiEvent::Skills(list) => assert_eq!(
             list.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
-            ["rust-clap", "stubborn"]
+            ["rust-clap", "stubborn", "self-improve"]
         ),
         _ => unreachable!(),
     }
@@ -441,7 +452,7 @@ async fn skills_catalog_slash_invocation_load_and_review() {
         })
         .unwrap();
     let after = run
-        .until(|e| matches!(e, UiEvent::Skills(list) if list.len() == 3))
+        .until(|e| matches!(e, UiEvent::Skills(list) if list.len() == 4))
         .await;
     assert!(matches!(after, UiEvent::Skills(list) if list.iter().any(|s| s.name == "zig-build")));
     let data = run.data.clone();

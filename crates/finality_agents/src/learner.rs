@@ -153,6 +153,33 @@ impl Learner {
         self.done.load(Ordering::SeqCst)
     }
 
+    /// Queues closed events the Learner never processed (e.g. Finality quit first). Returns how many.
+    pub fn catch_up(&self) -> usize {
+        let mut queued = 0;
+        for store in [
+            EventStore::main(&self.deps.data),
+            EventStore::for_role(&self.deps.data, Role::Worker),
+            EventStore::for_role(&self.deps.data, Role::Research),
+        ] {
+            let Ok(file) = store.load() else { continue };
+            let mut pending: Vec<_> = file
+                .events()
+                .into_iter()
+                .filter(|v| v.event.status == EventStatus::Closed && !v.event.learned)
+                .map(|v| (v.event.updated_at, v.event.id))
+                .collect();
+            pending.sort();
+            for (_, event) in pending {
+                self.submit(LearnJob {
+                    store: store.clone(),
+                    event,
+                });
+                queued += 1;
+            }
+        }
+        queued
+    }
+
     pub async fn wait_idle(&self, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -179,8 +206,22 @@ impl Learner {
             });
             match next {
                 Some(job) => {
-                    if let Err(e) = self.learn(&job).await {
-                        tracing::warn!(event = %job.event, error = %e, "learner job failed");
+                    match self.learn(&job).await {
+                        Ok(true) => {
+                            let marked = job.store.update(|f| {
+                                if let Some(e) = f.event_mut(job.event) {
+                                    e.learned = true;
+                                }
+                            });
+                            if let Err(e) = marked {
+                                tracing::warn!(event = %job.event, error = %e, "cannot mark event as learned");
+                            }
+                        }
+                        Ok(false) => {}
+                        // Left unmarked, so the next start tries again.
+                        Err(e) => {
+                            tracing::warn!(event = %job.event, error = %e, "learner job failed")
+                        }
                     }
                     self.done.fetch_add(1, Ordering::SeqCst);
                     self.busy.store(false, Ordering::SeqCst);
@@ -226,18 +267,21 @@ impl Learner {
         None
     }
 
-    async fn learn(&self, job: &LearnJob) -> Result<(), String> {
+    /// `Ok(true)` once the event is dealt with for good; `Ok(false)` when it isn't ready (still open) or was done before.
+    async fn learn(&self, job: &LearnJob) -> Result<bool, String> {
         let file = job.store.load().map_err(|e| e.to_string())?;
         let v = file
             .event(job.event)
             .ok_or_else(|| format!("event {} not found", job.event))?;
-        if v.event.status != EventStatus::Closed
-            || v.event
-                .outcome
-                .as_deref()
-                .is_some_and(|o| o.to_lowercase().contains("fail"))
+        if v.event.status != EventStatus::Closed || v.event.learned {
+            return Ok(false);
+        }
+        if v.event
+            .outcome
+            .as_deref()
+            .is_some_and(|o| o.to_lowercase().contains("fail"))
         {
-            return Ok(());
+            return Ok(true);
         }
         let session = v.session.session_id;
         let path = self.deps.data.sessions_dir().join(&v.session.log_file);
@@ -298,10 +342,10 @@ impl Learner {
             wrap_untrusted("session-log", &transcript)
         );
         let Some(lesson) = self.ask(user).await else {
-            return Ok(());
+            return Err("the model gave no usable answer".into());
         };
         if lesson.outcome == "failed" {
-            return Ok(());
+            return Ok(true);
         }
         let event_id = job.event.to_string();
 
@@ -368,6 +412,6 @@ impl Learner {
                 Err(e) => tracing::warn!(error = %e, "cannot update the user profile"),
             }
         }
-        Ok(())
+        Ok(true)
     }
 }

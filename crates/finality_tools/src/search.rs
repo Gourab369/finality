@@ -153,6 +153,35 @@ fn relative(path: &Path, workdir: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// Paths relative to `root` of files and folders (folders end in `/`) down to `depth` levels, honoring
+/// `.gitignore`. At most `max` entries. Used for `@`-mentions.
+pub fn list_paths(root: &Path, depth: Option<usize>, max: usize) -> Vec<String> {
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .follow_links(false)
+        .require_git(false)
+        .git_global(false)
+        .max_depth(depth)
+        .filter_entry(|e| e.file_name() != ".git")
+        .build();
+    let mut out = Vec::new();
+    for entry in walker.flatten() {
+        let rel = relative(entry.path(), root);
+        if rel.is_empty() {
+            continue;
+        }
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
+            out.push(format!("{rel}/"));
+        } else {
+            out.push(rel);
+        }
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
 fn search(
     root: &Path,
     guard: &PathGuard,

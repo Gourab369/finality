@@ -33,7 +33,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "mode",
-        args: "<plan|cowork|auto-edit|auto>",
+        args: "<plan|cowork|auto>",
         help: "Change the permission mode",
     },
     CommandInfo {
@@ -55,6 +55,26 @@ pub const COMMANDS: &[CommandInfo] = &[
         name: "context",
         args: "",
         help: "Show token usage",
+    },
+    CommandInfo {
+        name: "compact",
+        args: "",
+        help: "Summarize earlier exchanges into memory events and reload the context (keeps the last 2)",
+    },
+    CommandInfo {
+        name: "checkpoints",
+        args: "",
+        help: "List the files saved before each turn's edits",
+    },
+    CommandInfo {
+        name: "undo",
+        args: "[n]",
+        help: "Undo edits: restore files to before checkpoint n (default: the latest)",
+    },
+    CommandInfo {
+        name: "diff",
+        args: "",
+        help: "Show uncommitted git changes",
     },
     CommandInfo {
         name: "agents",
@@ -247,7 +267,7 @@ pub fn parse_with(input: &str, skills: &[String]) -> Result<SlashAction, String>
         "resume" => SlashCommand::Resume {
             id: first.map(str::to_owned),
         },
-        "mode" => SlashCommand::Mode(parse_arg::<Mode>(&name, first)?),
+        "mode" => SlashCommand::Mode(parse_arg::<Mode>(&name, first)?.canonical()),
         "think" => SlashCommand::Think(parse_arg::<ThinkLevel>(&name, first)?),
         "provider" => SlashCommand::Provider {
             provider: parse_arg::<ProviderKind>(&name, first)?,
@@ -257,6 +277,16 @@ pub fn parse_with(input: &str, skills: &[String]) -> Result<SlashAction, String>
             SlashCommand::Model(m.to_owned())
         }),
         "context" => SlashCommand::Context,
+        "compact" if args.is_empty() => SlashCommand::Compact,
+        "compact" => return Err(usage(&name)),
+        "checkpoints" if args.is_empty() => SlashCommand::Checkpoints,
+        "undo" => match (first, args.len()) {
+            (None, 0) => SlashCommand::Undo(None),
+            (Some(n), 1) => SlashCommand::Undo(Some(n.parse().map_err(|_| usage(&name))?)),
+            _ => return Err(usage(&name)),
+        },
+        "diff" if args.is_empty() => SlashCommand::Diff,
+        "checkpoints" | "diff" => return Err(usage(&name)),
         "" => return Err("type a command name after /".into()),
         other if skills.iter().any(|s| s == other) => SlashCommand::Skill {
             name: other.to_owned(),
@@ -348,7 +378,8 @@ mod tests {
         assert_eq!(parse(" /EXIT "), Ok(SlashAction::Quit));
         assert_eq!(
             parse("/mode auto-edit"),
-            Ok(SlashAction::Core(SlashCommand::Mode(Mode::AutoEdit)))
+            Ok(SlashAction::Core(SlashCommand::Mode(Mode::Cowork))),
+            "auto-edit was merged into cowork"
         );
         assert_eq!(
             parse("/think off"),
@@ -419,7 +450,7 @@ mod tests {
     fn reports_errors_with_hints() {
         assert_eq!(
             parse("/mode").unwrap_err(),
-            "usage: /mode <plan|cowork|auto-edit|auto>"
+            "usage: /mode <plan|cowork|auto>"
         );
         assert!(parse("/mode yolo").unwrap_err().contains("invalid mode"));
         assert_eq!(

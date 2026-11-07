@@ -48,6 +48,80 @@ impl Triage {
     }
 }
 
+const QUICK_MAX_CHARS: usize = 160;
+const QUICK_COMMAND_MAX_CHARS: usize = 80;
+const SMALL_TALK: &[&str] = &[
+    "hi",
+    "hello",
+    "hey",
+    "thanks",
+    "thank you",
+    "thx",
+    "ok",
+    "okay",
+    "yes",
+    "no",
+    "cool",
+    "great",
+    "nice",
+    "bye",
+    "good morning",
+    "good night",
+];
+const QUESTION_WORDS: &[&str] = &[
+    "what", "why", "how", "when", "where", "who", "which", "is", "are", "can", "could", "does",
+    "do", "should", "would", "will",
+];
+/// Words that suggest several steps; such messages always get a full triage.
+const MULTI_STEP_MARKERS: &[&str] = &[
+    " and ",
+    " then ",
+    "after that",
+    "first",
+    "step",
+    "plan",
+    "refactor",
+    "implement",
+    "migrate",
+    "build a",
+    "create a",
+    "set up",
+    "setup",
+];
+
+/// A triage without a model request for obviously simple messages: small talk, short questions and short
+/// single-step commands. `None` means the message needs the real triage.
+pub fn quick(text: &str) -> Option<Triage> {
+    let t = text.trim();
+    if t.is_empty() || t.len() > QUICK_MAX_CHARS || t.contains('\n') || t.contains("```") {
+        return None;
+    }
+    let lower = t.to_lowercase();
+    let padded = format!(" {lower} ");
+    if MULTI_STEP_MARKERS.iter().any(|m| padded.contains(m)) {
+        return None;
+    }
+    let bare = lower.trim_end_matches(['.', '!', '?', ' ']);
+    let first = lower.split_whitespace().next().unwrap_or("");
+    let query_type = if SMALL_TALK.contains(&bare) {
+        "conversation"
+    } else if lower.ends_with('?') || QUESTION_WORDS.contains(&first) {
+        "question"
+    } else if t.len() <= QUICK_COMMAND_MAX_CHARS && !t.contains([',', ';']) {
+        "command"
+    } else {
+        return None;
+    };
+    Some(Triage {
+        query_type: query_type.into(),
+        topic: "general".into(),
+        complexity: Complexity::Simple,
+        needs_tools: query_type != "conversation",
+        tool_hints: Vec::new(),
+        knowledge_topics: Vec::new(),
+    })
+}
+
 pub fn schema() -> Value {
     json!({
         "type": "object",
@@ -119,6 +193,29 @@ pub async fn triage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_triage_takes_only_obviously_simple_messages() {
+        let kind = |t: &str| quick(t).map(|q| q.query_type);
+        assert_eq!(kind("thanks!").as_deref(), Some("conversation"));
+        assert_eq!(kind("What does main.rs do?").as_deref(), Some("question"));
+        assert_eq!(
+            kind("how is the config loaded").as_deref(),
+            Some("question")
+        );
+        assert_eq!(kind("read Cargo.toml").as_deref(), Some("command"));
+        for needs_triage in [
+            "add a --verbose flag and update the docs",
+            "first find the parser, then add a flag",
+            "refactor the store module",
+            "fix the build, run the tests; commit",
+            "line one\nline two",
+            &"x".repeat(200),
+        ] {
+            assert!(quick(needs_triage).is_none(), "{needs_triage}");
+        }
+        assert!(!quick("hi").unwrap().needs_tools);
+    }
 
     #[test]
     fn parses_plain_and_fenced_json() {

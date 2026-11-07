@@ -8,8 +8,10 @@ license.workspace = true
 
 [dependencies]
 finality_core.workspace = true
+arboard.workspace = true
 crossterm.workspace = true
 futures.workspace = true
+png.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
 tui-textarea.workspace = true

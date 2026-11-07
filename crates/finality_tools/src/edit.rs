@@ -46,6 +46,7 @@ enum Op {
     Write {
         content: String,
     },
+    Delete,
 }
 
 impl Op {
@@ -55,8 +56,23 @@ impl Op {
             Op::ReplaceLines { .. } => "replace_lines",
             Op::ReplaceText { .. } => "replace_text",
             Op::Write { .. } => "write",
+            Op::Delete => "delete",
         }
     }
+}
+
+fn is_delete(ops: &[Op]) -> bool {
+    matches!(ops, [Op::Delete])
+}
+
+/// Size and modification time, to notice a file changing between review and deletion.
+fn stamp(meta: &std::fs::Metadata) -> Value {
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+    json!({ "len": meta.len(), "modified": modified })
 }
 
 #[derive(Deserialize)]
@@ -153,6 +169,7 @@ fn describe_ops(ops: &[Op]) -> String {
                     "write the whole file ({} lines)",
                     content_lines(content).len()
                 ),
+                Op::Delete => "delete the file".to_owned(),
             };
             format!("{}. {what}", i + 1)
         })
@@ -177,11 +194,113 @@ fn join_lines(lines: &[String], trailing: bool) -> String {
     s
 }
 
+fn indent(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
+/// Replaces the one run of whole lines that equals `old` when each line's surrounding whitespace is
+/// ignored, shifting `new`'s indentation by the difference. `Ok(None)` when there is no such run.
+fn fuzzy_replace(text: &str, old: &str, new: &str) -> Result<Option<String>, String> {
+    let old_lines: Vec<&str> = old.trim_matches('\n').split('\n').collect();
+    if old_lines.iter().all(|l| l.trim().is_empty()) {
+        return Ok(None);
+    }
+    let (mut lines, trailing) = split_lines(text);
+    if old_lines.len() > lines.len() {
+        return Ok(None);
+    }
+    let starts: Vec<usize> = (0..=lines.len() - old_lines.len())
+        .filter(|&s| {
+            old_lines
+                .iter()
+                .enumerate()
+                .all(|(k, l)| lines[s + k].trim() == l.trim())
+        })
+        .collect();
+    match starts.as_slice() {
+        [] => Ok(None),
+        &[s] => {
+            let k = old_lines
+                .iter()
+                .position(|l| !l.trim().is_empty())
+                .unwrap_or(0);
+            let from = indent(old_lines[k]).to_owned();
+            let to = indent(&lines[s + k]).to_owned();
+            let replacement: Vec<String> = content_lines(new)
+                .into_iter()
+                .map(|l| {
+                    if l.trim().is_empty() {
+                        String::new()
+                    } else if let Some(rest) = l.strip_prefix(from.as_str()) {
+                        format!("{to}{rest}")
+                    } else {
+                        l
+                    }
+                })
+                .collect();
+            lines.splice(s..s + old_lines.len(), replacement);
+            Ok(Some(join_lines(&lines, trailing)))
+        }
+        many => Err(format!(
+            "`old` is not in the file exactly, and matches {} places when indentation is ignored (lines {}); \
+             include more surrounding lines",
+            many.len(),
+            many.iter()
+                .map(|s| (s + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// "Not found" with the file lines most like `old`'s first line, so the model can correct it without rereading.
+fn not_found(text: &str, old: &str) -> String {
+    let mut msg =
+        "`old` text not found; it must match the file exactly (indentation may differ only when \
+                   `old` is whole lines)"
+            .to_owned();
+    let Some(probe) = old.split('\n').map(str::trim).find(|l| !l.is_empty()) else {
+        return msg;
+    };
+    let probe: String = probe.chars().take(200).collect();
+    let lines: Vec<&str> = text.split('\n').collect();
+    if lines.len() > 20_000 {
+        return msg;
+    }
+    let mut scored: Vec<(f32, usize)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, l)| {
+            let l: String = l.trim().chars().take(200).collect();
+            (TextDiff::from_chars(probe.as_str(), l.as_str()).ratio(), i)
+        })
+        .filter(|(r, _)| *r >= 0.6)
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    if !scored.is_empty() {
+        msg.push_str("; closest lines:");
+        for &(_, i) in scored.iter().take(3) {
+            msg.push_str(&format!(
+                "\n{}: {}",
+                i + 1,
+                truncate_middle(lines[i], 200).0
+            ));
+        }
+    }
+    msg
+}
+
 /// Applies operations in order; line numbers refer to the content produced by earlier operations.
 fn apply(original: Option<&str>, ops: &[Op]) -> Result<String, ToolError> {
     if ops.is_empty() {
         return Err(ToolError::InvalidArgs(
             "operations must not be empty".into(),
+        ));
+    }
+    if ops.iter().any(|op| matches!(op, Op::Delete)) {
+        return Err(ToolError::InvalidArgs(
+            "`delete` must be the only operation".into(),
         ));
     }
     if original.is_none() && !matches!(ops[0], Op::Write { .. }) {
@@ -194,6 +313,7 @@ fn apply(original: Option<&str>, ops: &[Op]) -> Result<String, ToolError> {
         let err =
             |m: String| ToolError::InvalidArgs(format!("operation {} ({}): {m}", i + 1, op.kind()));
         match op {
+            Op::Delete => {}
             Op::Write { content } => text = content.replace("\r\n", "\n"),
             Op::Insert { line, content } => {
                 let (mut lines, trailing) = split_lines(&text);
@@ -235,7 +355,11 @@ fn apply(original: Option<&str>, ops: &[Op]) -> Result<String, ToolError> {
                 let count = text.matches(old.as_str()).count();
                 match occurrence {
                     None if count == 1 => text = text.replacen(&old, &new, 1),
-                    None if count == 0 => return Err(err("`old` text not found".into())),
+                    None if count == 0 => match fuzzy_replace(&text, &old, &new) {
+                        Ok(Some(t)) => text = t,
+                        Ok(None) => return Err(err(not_found(&text, &old))),
+                        Err(m) => return Err(err(m)),
+                    },
                     None => {
                         return Err(err(format!(
                             "`old` matches {count} times; pass occurrence (1-based) or \"all\""
@@ -243,7 +367,7 @@ fn apply(original: Option<&str>, ops: &[Op]) -> Result<String, ToolError> {
                     }
                     Some(Occurrence::Word(w)) if w == "all" => {
                         if count == 0 {
-                            return Err(err("`old` text not found".into()));
+                            return Err(err(not_found(&text, &old)));
                         }
                         text = text.replace(&old, &new);
                     }
@@ -310,7 +434,10 @@ impl Tool for EditFile {
          result of earlier operations). The batch is all-or-nothing. Operations: insert {line, content} \
          inserts before `line` (use last+1 to append); replace_lines {start_line, end_line, content} \
          (empty content deletes); replace_text {old, new, occurrence?} where `old` must be unique unless \
-         occurrence is a 1-based number or \"all\"; write {content} replaces or creates the whole file."
+         occurrence is a 1-based number or \"all\" (when `old` is whole lines, differing indentation is \
+         tolerated and `new` is re-indented to match); write {content} replaces or creates the whole file; \
+         delete {} deletes the file and must be the only operation. Changes are saved in checkpoints and \
+         can be undone."
     }
 
     fn schema(&self) -> Value {
@@ -324,7 +451,7 @@ impl Tool for EditFile {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "op": { "type": "string", "enum": ["insert", "replace_lines", "replace_text", "write"] },
+                            "op": { "type": "string", "enum": ["insert", "replace_lines", "replace_text", "write", "delete"] },
                             "line": { "type": "integer", "minimum": 1 },
                             "start_line": { "type": "integer", "minimum": 1 },
                             "end_line": { "type": "integer", "minimum": 1 },
@@ -348,18 +475,38 @@ impl Tool for EditFile {
 
     async fn preview(&self, args: &Value, ctx: &ToolCtx) -> Result<ActionPreview, ToolError> {
         let a: Args = parse_args(args)?;
+        let delete = is_delete(&a.operations);
         let (location, path, reasons) = resolve_path(ctx, &a.path);
         let shown = display_path(&ctx.env, &path);
         if location != Location::Inside {
             // Read nothing before the user decides, or the model could probe files it may not see.
-            let mut p = ActionPreview::new(
-                format!("edit {shown} ({} operation(s))", a.operations.len()),
-                location,
-            );
+            let summary = if delete {
+                format!("delete {shown}")
+            } else {
+                format!("edit {shown} ({} operation(s))", a.operations.len())
+            };
+            let mut p = ActionPreview::new(summary, location);
             p.reasons = reasons;
             p.paths = vec![path];
             p.detail = Some(describe_ops(&a.operations));
+            p.deletes = delete;
             p.state = json!({ "deferred": true });
+            return Ok(p);
+        }
+        if delete {
+            let meta = std::fs::metadata(&path)
+                .map_err(|_| ToolError::Failed(format!("{shown} does not exist")))?;
+            if !meta.is_file() {
+                return Err(ToolError::Failed(format!(
+                    "{shown} is not a file; only files can be deleted"
+                )));
+            }
+            let mut p = ActionPreview::new(format!("delete {shown}"), location);
+            p.reasons = reasons;
+            p.paths = vec![path];
+            p.detail = Some(format!("delete {shown} ({} bytes)", meta.len()));
+            p.deletes = true;
+            p.state = json!({ "stamp": stamp(&meta) });
             return Ok(p);
         }
         let original = load(&path)?;
@@ -381,19 +528,44 @@ impl Tool for EditFile {
     async fn call(
         &self,
         args: Value,
-        _ctx: &ToolCtx,
+        ctx: &ToolCtx,
         preview: &ActionPreview,
     ) -> Result<ToolOutput, ToolError> {
         let a: Args = parse_args(&args)?;
         let path = preview.paths[0].clone();
-        let original = load(&path)?;
+        let shown = display_path(&ctx.env, &path);
         let deferred = preview.state["deferred"].as_bool().unwrap_or(false);
+        let changed = "the file changed after the edit was reviewed; read it again and retry";
+        if is_delete(&a.operations) {
+            let meta = match std::fs::metadata(&path) {
+                Ok(m) if m.is_file() => m,
+                _ => return Ok(ToolOutput::error(format!("{shown} is not a file"))),
+            };
+            if !deferred && stamp(&meta) != preview.state["stamp"] {
+                return Ok(ToolOutput::error(changed));
+            }
+            if let Some(cps) = &ctx.env.checkpoints {
+                cps.record(&path, &shown).map_err(|e| {
+                    ToolError::Failed(format!(
+                        "could not save {shown} for undo, so it was not deleted: {e}"
+                    ))
+                })?;
+            }
+            std::fs::remove_file(&path)?;
+            return Ok(ToolOutput::ok(format!("deleted {shown}")));
+        }
+        let original = load(&path)?;
         if !deferred && json!(original.fingerprint) != preview.state["fingerprint"] {
-            return Ok(ToolOutput::error(
-                "the file changed after the edit was reviewed; read it again and retry",
-            ));
+            return Ok(ToolOutput::error(changed));
         }
         let new_text = apply(original.text.as_deref(), &a.operations)?;
+        let undo_note = match &ctx.env.checkpoints {
+            Some(cps) => match cps.record(&path, &shown) {
+                Ok(()) => String::new(),
+                Err(e) => format!("\n(not saved for undo: {e})"),
+            },
+            None => String::new(),
+        };
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -401,7 +573,7 @@ impl Tool for EditFile {
         let (diff_text, _, _) = diff(original.text.as_deref().unwrap_or(""), &new_text, "");
         let (diff_text, _) = truncate_middle(&diff_text, MAX_DIFF_IN_OUTPUT);
         Ok(ToolOutput::ok(format!(
-            "{}\n{diff_text}",
+            "{}{undo_note}\n{diff_text}",
             preview
                 .summary
                 .replacen("edit ", "edited ", 1)
@@ -473,6 +645,57 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn whitespace_tolerant_replace_reindents() {
+        let src = "fn main() {\n    if x {\n        run();\n    }\n}\n";
+        let out = apply(
+            Some(src),
+            &ops(json!([{ "op": "replace_text", "old": "if x {\n    run();\n}", "new": "if x {\n    run();\n    stop();\n}" }])),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "fn main() {\n    if x {\n        run();\n        stop();\n    }\n}\n"
+        );
+
+        let err = apply(
+            Some("a\n  b\nc\n    b\n"),
+            &ops(json!([{ "op": "replace_text", "old": "\tb", "new": "x" }])),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("matches 2 places") && err.contains("lines 2, 4"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn not_found_names_the_closest_lines() {
+        let err = apply(
+            Some("let total = price * qty;\nprintln!(\"{total}\");\n"),
+            &ops(json!([{ "op": "replace_text", "old": "let total = price * quantity;", "new": "" }])),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("not found") && err.contains("\n1: let total = price * qty;"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn delete_must_be_alone() {
+        let err = apply(
+            Some("a\n"),
+            &ops(json!([{ "op": "delete" }, { "op": "write", "content": "x" }])),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("only operation"), "{err}");
+        assert!(is_delete(&ops(json!([{ "op": "delete" }]))));
     }
 
     #[test]

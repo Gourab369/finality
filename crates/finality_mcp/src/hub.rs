@@ -39,6 +39,8 @@ pub struct HubSettings {
     pub start_timeout: Duration,
     /// Bound on one `tools/call`; a server that stalls returns an error instead of holding the agent.
     pub call_timeout: Duration,
+    /// Lock files of the Finality editor extension; `None` turns the editor server off.
+    pub ide_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +94,8 @@ pub struct CachedTool {
     pub description: String,
     #[serde(rename = "inputSchema", default)]
     pub input_schema: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub annotations: Value,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -178,11 +182,29 @@ impl Server {
         self.tools.read().ok().and_then(|t| t.clone())
     }
 
+    /// Failed servers wait for `/mcp enable`; the editor may simply not have been open yet.
+    fn retryable(&self) -> bool {
+        self.def.origin == Origin::Ide || !matches!(self.state(), ServerState::Failed(_))
+    }
+
     fn set_tools(self: &Arc<Self>, tools: &[CachedTool]) {
+        let wanted = |name: &str| {
+            let norm = |s: &str| s.to_ascii_lowercase().replace('-', "_");
+            self.def
+                .tools
+                .as_ref()
+                .is_none_or(|list| list.iter().any(|w| norm(w) == norm(name)))
+        };
+        let tools: Vec<&CachedTool> = tools.iter().filter(|t| wanted(&t.name)).collect();
+        if let Some(list) = &self.def.tools
+            && tools.len() < list.len()
+        {
+            tracing::warn!(server = %self.def.name, wanted = ?list, "some tools listed in mcp.json do not exist");
+        }
         let remote: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         let names = crate::tool::unique_tool_names(self.name(), &remote);
         let adapted: Vec<Arc<dyn Tool>> = tools
-            .iter()
+            .into_iter()
             .zip(names)
             .map(|(t, name)| Arc::new(McpTool::new(self, t, name)) as Arc<dyn Tool>)
             .collect();
@@ -279,6 +301,7 @@ impl Server {
     fn fail(&self, error: String) -> String {
         let mut message = format!("MCP server `{}`: {error}", self.def.name);
         if matches!(self.def.transport, Transport::Http { .. })
+            && self.def.origin != Origin::Ide
             && error.to_lowercase().contains("auth")
         {
             message.push_str(&format!("; run /mcp login {}", self.def.name));
@@ -355,9 +378,25 @@ impl Server {
                     .map_err(|e| format!("initialization failed: {}", chain(&e)))
             }
             Transport::Http { url, headers } => {
+                let ide = self.def.origin == Origin::Ide;
+                let (url, headers) = match &self.settings.ide_dir {
+                    Some(dir) if ide => {
+                        let (url, token) = crate::ide::locate(dir, &self.settings.workdir)?;
+                        let mut headers = BTreeMap::from([(
+                            "Authorization".to_owned(),
+                            format!("Bearer {token}"),
+                        )]);
+                        // Relative paths and the read-only scope follow Finality's working directory.
+                        if let Ok(uri) = url::Url::from_file_path(&self.settings.workdir) {
+                            headers.insert(crate::ide::WORKDIR_HEADER.to_owned(), uri.to_string());
+                        }
+                        (url, headers)
+                    }
+                    _ => (url.clone(), headers.clone()),
+                };
                 let mut config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
                 let mut custom = std::collections::HashMap::new();
-                for (k, v) in headers {
+                for (k, v) in &headers {
                     let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
                         .map_err(|e| format!("bad header name `{k}`: {e}"))?;
                     let value = reqwest::header::HeaderValue::from_str(v)
@@ -365,8 +404,9 @@ impl Server {
                     custom.insert(name, value);
                 }
                 config = config.custom_headers(custom);
-                if let Some(token) =
-                    auth::access_token(url, &self.def.name, &self.settings.vault).await?
+                if !ide
+                    && let Some(token) =
+                        auth::access_token(&url, &self.def.name, &self.settings.vault).await?
                 {
                     config = config.auth_header(token);
                 }
@@ -504,12 +544,21 @@ impl McpHub {
             );
             problems = loaded.problems;
             let cache = read_cache(&self.settings.cache_file);
-            let servers: Vec<Arc<Server>> = loaded
-                .servers
+            let mut defs = loaded.servers;
+            if let Some(def) = self
+                .settings
+                .ide_dir
+                .as_deref()
+                .and_then(crate::ide::server_def)
+                && !defs.iter().any(|d| d.name == def.name)
+            {
+                defs.push(def);
+            }
+            let servers: Vec<Arc<Server>> = defs
                 .into_iter()
                 .map(|def| {
                     let decision = match def.origin {
-                        Origin::Global => Trust::Trusted,
+                        Origin::Global | Origin::Ide => Trust::Trusted,
                         Origin::Project => match trust.get(&def.name) {
                             Some(t) if t.fingerprint == def.fingerprint => {
                                 if t.trusted {
@@ -594,7 +643,8 @@ impl McpHub {
                 ServerState::Running if !running => ServerState::Stopped,
                 other => other,
             };
-            let http = matches!(s.def.transport, Transport::Http { .. });
+            let http =
+                matches!(s.def.transport, Transport::Http { .. }) && s.def.origin != Origin::Ide;
             out.push(ServerStatus {
                 name: s.def.name.clone(),
                 origin: s.def.origin,
@@ -643,6 +693,11 @@ impl McpHub {
                 "`{name}` is a stdio server; only HTTP servers log in"
             ));
         };
+        if server.def.origin == Origin::Ide {
+            return Err(format!(
+                "`{name}` is the editor extension; it needs no login"
+            ));
+        }
         auth::login(url, name, &self.settings.vault, show_url, cancel).await?;
         server.stop().await;
         server.set_state(ServerState::Stopped);
@@ -672,11 +727,7 @@ impl ToolSource for McpHub {
         let todo: Vec<Arc<Server>> = self
             .servers()
             .into_iter()
-            .filter(|s| {
-                s.trust() == Trust::Trusted
-                    && s.tools().is_none()
-                    && !matches!(s.state(), ServerState::Failed(_))
-            })
+            .filter(|s| s.trust() == Trust::Trusted && s.tools().is_none() && s.retryable())
             .collect();
         let work = futures::future::join_all(todo.iter().map(|s| s.connect()));
         tokio::select! {
@@ -691,11 +742,7 @@ impl ToolSource for McpHub {
         }
         self.servers()
             .iter()
-            .filter(|s| {
-                s.trust() == Trust::Trusted
-                    && s.tools().is_none()
-                    && !matches!(s.state(), ServerState::Failed(_))
-            })
+            .filter(|s| s.trust() == Trust::Trusted && s.tools().is_none() && s.retryable())
             .map(|s| s.def.name.clone())
             .collect()
     }

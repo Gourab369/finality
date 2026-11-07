@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.89"
 publish = false
@@ -22,6 +22,7 @@ finality_agents = { path = "crates/finality_agents" }
 finality_tui = { path = "crates/finality_tui" }
 
 anyhow = "1"
+arboard = "3"
 async-trait = "0.1"
 base64 = "0.22"
 chromiumoxide = "0.9"
@@ -37,7 +38,9 @@ ignore = "0.4"
 insta = "1"
 keyring = "4.2"
 landlock = "0.4"
+lopdf = { version = "0.47", default-features = false }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+png = "0.18"
 proptest = "1"
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 process-wrap = { version = "10", features = ["tokio1"] }

@@ -45,6 +45,9 @@ pub struct Event {
     pub status: EventStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// The Learner has processed this closed event (so start-up doesn't queue it again).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub learned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -404,6 +407,7 @@ pub(crate) mod tests {
             related: Vec::new(),
             status: EventStatus::Open,
             outcome: None,
+            learned: false,
         }
     }
 

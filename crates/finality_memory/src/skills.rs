@@ -8,7 +8,10 @@ use finality_store::DataDir;
 pub const SKILL_FILE: &str = "SKILL.md";
 const MAX_NAME: usize = 64;
 /// Skills compiled into the binary. They have no folder (`dir` is empty).
-const BUILTIN: &[&str] = &[include_str!("../skills/stubborn/SKILL.md")];
+const BUILTIN: &[&str] = &[
+    include_str!("../skills/stubborn/SKILL.md"),
+    include_str!("../skills/self-improve/SKILL.md"),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
@@ -504,7 +507,7 @@ mod tests {
         let c = lib.load();
         assert_eq!(
             c.active.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
-            ["good", "stubborn"]
+            ["good", "stubborn", "self-improve"]
         );
         assert_eq!(c.pending.len(), 1);
         assert_eq!(c.problems.len(), 1);
@@ -539,6 +542,8 @@ mod tests {
         let builtin = lib.load();
         let s = builtin.get("stubborn").unwrap();
         assert!(s.body.contains("Hard blocks") && builtin.problems.is_empty());
+        let s = builtin.get("self-improve").unwrap();
+        assert!(s.body.contains("Improve after every task") && s.is_builtin());
         assert!(lib.exists("stubborn"), "the Learner cannot shadow it");
 
         write(
@@ -547,7 +552,7 @@ mod tests {
             "---\nname: stubborn\ndescription: mine\n---\nbody",
         );
         let c = lib.load();
-        assert_eq!(c.active.len(), 1);
+        assert_eq!(c.active.len(), BUILTIN.len());
         assert_eq!(c.get("stubborn").unwrap().description, "mine");
     }
 }

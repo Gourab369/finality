@@ -67,9 +67,20 @@ fn start_with(
     existing: Option<(tempfile::TempDir, PathBuf, DataDir)>,
     choose_model: bool,
 ) -> Harness {
-    let (tmp, work, data) = existing.unwrap_or_else(dirs);
     let mut config = Config::default();
     config.general.default_mode = mode;
+    // Scripted providers expect a triage request for every prompt.
+    config.llm.quick_triage = false;
+    launch(provider, config, existing, choose_model)
+}
+
+fn launch(
+    provider: Arc<dyn LlmProvider>,
+    config: Config,
+    existing: Option<(tempfile::TempDir, PathBuf, DataDir)>,
+    choose_model: bool,
+) -> Harness {
+    let (tmp, work, data) = existing.unwrap_or_else(dirs);
     let deps = CoreDeps {
         config,
         workspace: Workspace::from_dir(&work).unwrap(),
@@ -179,8 +190,8 @@ async fn read_file_turn_with_approval_is_logged_end_to_end() {
     let (_tmp, _work, data, seen) = h.quit().await;
 
     assert!(
-        seen.iter()
-            .any(|e| matches!(e, UiEvent::Approval(p) if p.tool == "read_file" && p.inside))
+        !seen.iter().any(|e| matches!(e, UiEvent::Approval(_))),
+        "cowork reads inside the working directory without asking"
     );
     assert!(seen.iter().any(|e| matches!(
         e,
@@ -286,6 +297,155 @@ async fn direct_mode_changes_the_prompt_and_is_remembered() {
             .content()
             .contains("Direct mode")
     );
+}
+
+#[tokio::test]
+async fn compact_moves_earlier_exchanges_into_memory_events() {
+    let mut mock = MockProvider::new();
+    for n in ["one", "two", "three", "four"] {
+        mock = mock
+            .then_text(&triage(false))
+            .then_text(&format!("Answer {n}."));
+    }
+    let mock = Arc::new(mock);
+    let mut h = start(mock.clone(), Mode::Cowork, None);
+    for q in ["question one", "question two", "question three"] {
+        h.turn(q, None).await;
+    }
+    h.send(CoreCommand::Slash(SlashCommand::Compact));
+    // Sent while compacting: it waits, then runs on the compacted context.
+    h.send(CoreCommand::UserPrompt("question four".into()));
+    h.until(
+        |e| matches!(e, UiEvent::Notice { text, .. } if text.starts_with("compacted: 1 exchange(s)")),
+        None,
+    )
+    .await;
+    h.until(|e| matches!(e, UiEvent::TurnFinished { .. }), None)
+        .await;
+    h.quit().await;
+
+    let req = mock.requests().pop().unwrap();
+    let users: Vec<&str> = req
+        .messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::User { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(users, ["question two", "question three", "question four"]);
+    assert!(
+        req.messages
+            .iter()
+            .any(|m| m.content().starts_with("[Earlier in this conversation]"))
+    );
+}
+
+#[tokio::test]
+async fn simple_messages_skip_the_triage_request() {
+    let mock = Arc::new(MockProvider::new().then_text("Hello!"));
+    let mut h = launch(mock.clone(), Config::default(), None, false);
+    h.turn("hi", None).await;
+    h.quit().await;
+    let reqs = mock.requests();
+    assert_eq!(reqs.len(), 1, "no triage request");
+    assert!(reqs[0].response_format.is_none());
+}
+
+#[tokio::test]
+async fn instructions_mentions_and_undo_reach_the_model() {
+    let (tmp, work, data) = dirs();
+    std::fs::write(work.join("AGENTS.md"), "Always run cargo test.").unwrap();
+    std::fs::write(work.join("notes.txt"), "old\n").unwrap();
+    let mock = Arc::new(
+        MockProvider::new()
+            .then_text(&triage(true))
+            .then_tool_call(
+                "edit_file",
+                json!({ "path": "notes.txt", "operations": [{ "op": "write", "content": "new\n" }] }),
+            )
+            .then_text("Rewrote it.")
+            .then_text(&triage(false))
+            .then_text("Noted."),
+    );
+    let mut h = start(mock.clone(), Mode::Cowork, Some((tmp, work.clone(), data)));
+    h.turn("rewrite @notes.txt please", None).await;
+    assert_eq!(
+        std::fs::read_to_string(work.join("notes.txt")).unwrap(),
+        "new\n"
+    );
+    h.send(CoreCommand::Slash(SlashCommand::Undo(None)));
+    h.until(
+        |e| matches!(e, UiEvent::Notice { text, .. } if text.starts_with("restored to before checkpoint 1")),
+        None,
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(work.join("notes.txt")).unwrap(),
+        "old\n"
+    );
+    h.turn("thanks", None).await;
+    let id = h.session_id();
+    let (_tmp, _w, data, _) = h.quit().await;
+
+    let reqs = mock.requests();
+    let first = &reqs[1];
+    assert!(
+        first.messages[0]
+            .content()
+            .contains("Always run cargo test.")
+    );
+    let user = first
+        .messages
+        .iter()
+        .find_map(|m| match m {
+            Message::User { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        user.starts_with("rewrite @notes.txt please") && user.contains("File notes.txt:"),
+        "{user}"
+    );
+    let last = reqs.last().unwrap();
+    assert!(
+        last.messages.iter().any(
+            |m| matches!(m, Message::System { content } if content.contains("The user ran /undo"))
+        ),
+        "the model hears about the undo"
+    );
+    let logged: Vec<String> = read_log(&data.sessions_dir().join(id.log_file_name()))
+        .unwrap()
+        .records
+        .into_iter()
+        .filter_map(|r| match r.body {
+            Record::UserMessage { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(logged, ["rewrite @notes.txt please", "thanks"]);
+}
+
+#[tokio::test]
+async fn triage_runs_on_the_pinned_memory_model() {
+    let mock = Arc::new(
+        MockProvider::new()
+            .then_text(&triage(false))
+            .then_text("Done."),
+    );
+    let mut config = Config::default();
+    config.llm.quick_triage = false;
+    config.models.memory = "ollama:tiny:1b".into();
+    let mut h = launch(mock.clone(), config, None, false);
+    h.turn("explain the config loader in detail", None).await;
+    h.quit().await;
+    let reqs = mock.requests();
+    assert!(reqs[0].response_format.is_some());
+    assert_eq!(
+        reqs[0].model, "tiny:1b",
+        "triage leaves the main model's cache alone"
+    );
+    assert_ne!(reqs[1].model, "tiny:1b");
 }
 
 #[tokio::test]
@@ -418,18 +578,27 @@ async fn resume_replays_and_continues_the_conversation() {
             .then_text(&triage(false))
             .then_text("Answer one.")
             .then_text(&triage(false))
-            .then_text("Answer two."),
+            .then_text("Answer two.")
+            .then_text(&triage(false))
+            .then_text("Answer three."),
     );
     let mut h = start(first, Mode::Cowork, None);
     h.turn("question one", None).await;
     h.turn("question two", None).await;
+    h.turn("question three", None).await;
     let id = h.session_id();
     let (tmp, work, data, _) = h.quit().await;
+    let events = finality_memory::EventStore::main(&data).load().unwrap();
+    let refs = events.refs(&id);
+    assert!(
+        !refs.is_empty() && refs.iter().all(|(_, _, r)| r.finalized),
+        "quitting waited for the session summary"
+    );
 
     let second = Arc::new(
         MockProvider::new()
             .then_text(&triage(false))
-            .then_text("Answer three."),
+            .then_text("Answer four."),
     );
     let mut h = start(second.clone(), Mode::Cowork, Some((tmp, work, data)));
     // `/resume` without an id offers this directory's sessions in a picker.
@@ -446,7 +615,7 @@ async fn resume_replays_and_continues_the_conversation() {
         value: Some(picker.items[0].value.clone()),
     });
     h.until(
-        |e| matches!(e, UiEvent::UserMessage { text } if text == "question two"),
+        |e| matches!(e, UiEvent::UserMessage { text } if text == "question three"),
         None,
     )
     .await;
@@ -455,7 +624,7 @@ async fn resume_replays_and_continues_the_conversation() {
         None,
     )
     .await;
-    h.turn("question three", None).await;
+    h.turn("question four", None).await;
     assert_eq!(h.session_id_or_status(), Some(id));
     let (_tmp, _w, data, _) = h.quit().await;
 
@@ -464,11 +633,21 @@ async fn resume_replays_and_continues_the_conversation() {
         .messages
         .iter()
         .filter_map(|m| match m {
-            Message::User { content } => Some(content.as_str()),
+            Message::User { content, .. } => Some(content.as_str()),
             _ => None,
         })
         .collect();
-    assert_eq!(users, ["question one", "question two", "question three"]);
+    assert_eq!(
+        users,
+        ["question two", "question three", "question four"],
+        "only the last two exchanges come back verbatim"
+    );
+    assert!(
+        req.messages
+            .iter()
+            .any(|m| m.content().starts_with("[Earlier in this conversation]")),
+        "earlier exchanges are summarized"
+    );
     let k = kinds(&data, &id);
     assert!(k.contains(&"SessionResumed"));
     assert_eq!(k.iter().filter(|x| **x == "SessionEnd").count(), 2);

@@ -16,6 +16,7 @@ finality_tools.workspace = true
 finality_mcp.workspace = true
 finality_memory.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 futures.workspace = true
 serde.workspace = true

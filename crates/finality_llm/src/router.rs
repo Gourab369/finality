@@ -160,6 +160,13 @@ impl ModelSelector {
         }
     }
 
+    pub fn triage(&self) -> ModelRef {
+        match self.config.read() {
+            Ok(cfg) => crate::models::resolve_triage(&cfg),
+            Err(e) => crate::models::resolve_triage(&e.into_inner()),
+        }
+    }
+
     /// The default provider and its model, for roles without `models.<role>`.
     pub fn set_default(&self, provider: ProviderKind, model: &str) {
         if let Ok(mut cfg) = self.config.write() {

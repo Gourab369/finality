@@ -128,6 +128,22 @@ impl DataDir {
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
     }
+    /// File contents saved before edits, per session, for undo.
+    pub fn checkpoints_dir(&self) -> PathBuf {
+        self.root.join("checkpoints")
+    }
+    /// Pasted images, per session.
+    pub fn attachments_dir(&self) -> PathBuf {
+        self.root.join("attachments")
+    }
+    /// Global instructions added to every session's system prompt.
+    pub fn instructions_file(&self) -> PathBuf {
+        self.root.join("FINALITY.md")
+    }
+    /// Lock files written by the Finality editor extension.
+    pub fn ide_dir(&self) -> PathBuf {
+        self.root.join("ide")
+    }
 }
 
 fn home_dir() -> io::Result<PathBuf> {

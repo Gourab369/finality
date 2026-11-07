@@ -270,6 +270,8 @@ async fn start(
     let mut config = Config::default();
     config.provider.ollama.base_url = server.uri();
     config.decision.enabled = enabled;
+    // Scripted providers expect a triage request for every prompt.
+    config.llm.quick_triage = false;
     let deps = CoreDeps {
         config,
         workspace: Workspace::from_dir(&work).unwrap(),
@@ -446,9 +448,8 @@ async fn confident_answers_replace_llm_triage() {
 
     let seen = run.quit().await;
     assert!(
-        seen.iter()
-            .any(|e| matches!(e, UiEvent::Approval(p) if p.tool == "edit_file")),
-        "approvals are unaffected by the decision model"
+        !seen.iter().any(|e| matches!(e, UiEvent::Approval(_))),
+        "approvals follow the mode, not the decision model: cowork writes without asking"
     );
     assert!(
         seen.iter()

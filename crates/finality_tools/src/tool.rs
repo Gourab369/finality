@@ -72,6 +72,8 @@ pub struct ActionPreview {
     pub shapes: Vec<CommandShape>,
     /// Set when the action must be confirmed in every mode but plan; the reason shown to the user.
     pub always_ask: Option<String>,
+    /// The action deletes files (asked for in `cowork`).
+    pub deletes: bool,
     pub grant_keys: Vec<String>,
     /// Tool-private data carried from preview to call.
     pub state: Value,
@@ -88,6 +90,7 @@ impl ActionPreview {
             command: None,
             shapes: Vec::new(),
             always_ask: None,
+            deletes: false,
             grant_keys: Vec::new(),
             state: Value::Null,
         }
@@ -162,6 +165,8 @@ pub struct ToolEnv {
     pub snapshot: EnvSnapshot,
     /// OS sandbox for shell commands classified as inside the working directory (`safety.os_sandbox`).
     pub sandbox: Option<Sandbox>,
+    /// Saves files before `edit_file` changes them, for undo.
+    pub checkpoints: Option<Arc<crate::checkpoint::Checkpoints>>,
 }
 
 impl ToolEnv {
@@ -177,11 +182,17 @@ impl ToolEnv {
             vars,
             snapshot,
             sandbox: None,
+            checkpoints: None,
         }
     }
 
     pub fn with_sandbox(mut self, sandbox: Sandbox) -> Self {
         self.sandbox = Some(sandbox);
+        self
+    }
+
+    pub fn with_checkpoints(mut self, checkpoints: Arc<crate::checkpoint::Checkpoints>) -> Self {
+        self.checkpoints = Some(checkpoints);
         self
     }
 }

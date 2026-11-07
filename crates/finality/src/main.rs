@@ -68,6 +68,7 @@ async fn run() -> Result<()> {
     tracing::info!(workdir = %workspace.workdir().display(), data_dir = %data_dir.root().display(), "starting");
 
     let provider = Arc::new(OllamaProvider::new(&config.provider.ollama, &config.llm)?);
+    let attachments_dir = data_dir.attachments_dir();
     let deps = CoreDeps {
         config: config.clone(),
         workspace,
@@ -86,6 +87,7 @@ async fn run() -> Result<()> {
         core.choose_model_at_start();
     }
     let mut app = App::new(core.status().clone());
+    app.set_attachments_dir(attachments_dir);
     if cli.direct {
         cmd_tx.send(CoreCommand::Slash(SlashCommand::Direct(Some(true))))?;
     }

@@ -121,6 +121,9 @@ async fn injected_page_raises_a_notice_and_leaves_the_mode_alone() {
     data.ensure().unwrap();
     let config = Config::default();
     let provider = Arc::new(Scripted::default());
+    // Scripted providers expect a triage request for every prompt.
+    let mut config = config;
+    config.llm.quick_triage = false;
     let deps = CoreDeps {
         config,
         workspace: Workspace::from_dir(&work).unwrap(),

@@ -12,6 +12,8 @@ pub enum Origin {
     Global,
     /// `<workdir>/.mcp.json`: needs a trust decision per project.
     Project,
+    /// The Finality editor extension, found through `<data>/ide/` lock files.
+    Ide,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,10 @@ pub struct ServerDef {
     pub name: String,
     pub origin: Origin,
     pub transport: Transport,
+    /// Tools annotated `readOnlyHint` run as reads (no approval in `cowork`). Global and editor servers only.
+    pub read_only_hints: bool,
+    /// Remote tool names to offer (`-` and `_` match each other); `None` offers every tool.
+    pub tools: Option<Vec<String>>,
     /// Hash of the raw entry; trust and the tool cache are tied to it.
     pub fingerprint: String,
 }
@@ -40,6 +46,9 @@ pub struct ServerDef {
 impl ServerDef {
     /// What the server runs or connects to, for prompts and `/mcp list`.
     pub fn target(&self) -> String {
+        if self.origin == Origin::Ide {
+            return "VS Code (Finality extension)".into();
+        }
         match &self.transport {
             Transport::Stdio { command, args, .. } => std::iter::once(command.as_str())
                 .chain(args.iter().map(String::as_str))
@@ -109,14 +118,32 @@ struct RawServer {
     headers: BTreeMap<String, String>,
     #[serde(default)]
     disabled: bool,
+    #[serde(default)]
+    trust_read_only_hints: bool,
+    tools: Option<Vec<String>>,
+}
+
+const KEYRING_PREFIX: &str = "keyring:";
+
+/// `${keyring:<user>}`: the secret stored under service `finality` and that user name.
+fn from_keyring(user: &str) -> Option<String> {
+    keyring::Entry::new("finality", user)
+        .ok()?
+        .get_password()
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
 }
 
 /// Reads the global file, then the project file; a project server replaces a global one of the same name.
-/// The global file may reference any environment variable; the project file only those in
-/// `project_env` (the denylist-filtered environment), so it cannot forward the user's secrets.
+/// The global file may reference any environment variable and keyring entries (`${keyring:<user>}`); the project
+/// file only variables in `project_env` (the denylist-filtered environment), so it cannot forward the user's secrets.
 pub fn load(global: &Path, project: Option<&Path>, project_env: &[(String, String)]) -> Loaded {
     let mut loaded = Loaded::default();
-    let from_process = |var: &str| std::env::var(var).ok();
+    let from_process = |var: &str| match var.strip_prefix(KEYRING_PREFIX) {
+        Some(user) => from_keyring(user),
+        None => std::env::var(var).ok(),
+    };
     let from_filtered = |var: &str| {
         project_env
             .iter()
@@ -126,7 +153,7 @@ pub fn load(global: &Path, project: Option<&Path>, project_env: &[(String, Strin
     for (path, origin) in [(Some(global), Origin::Global), (project, Origin::Project)] {
         let Some(path) = path else { continue };
         let lookup: &dyn Fn(&str) -> Option<String> = match origin {
-            Origin::Global => &from_process,
+            Origin::Global | Origin::Ide => &from_process,
             Origin::Project => &from_filtered,
         };
         let text = match std::fs::read_to_string(path) {
@@ -149,6 +176,14 @@ pub fn load(global: &Path, project: Option<&Path>, project_env: &[(String, Strin
         for (name, raw) in file.servers {
             match parse_server(&name, &raw, origin, lookup) {
                 Ok(Some(def)) => {
+                    if origin == Origin::Project
+                        && raw.get("trustReadOnlyHints").and_then(Value::as_bool) == Some(true)
+                    {
+                        loaded.problems.push(format!(
+                            "{}: server `{name}`: trustReadOnlyHints is only honored in the global mcp.json",
+                            path.display()
+                        ));
+                    }
                     loaded.servers.retain(|s| s.name != def.name);
                     loaded.servers.push(def);
                 }
@@ -224,6 +259,9 @@ fn parse_server(
         name: name.to_owned(),
         origin,
         transport,
+        // A project file must not be able to switch off approvals for its own server.
+        read_only_hints: s.trust_read_only_hints && origin == Origin::Global,
+        tools: s.tools,
         fingerprint: fingerprint(raw),
     }))
 }
@@ -247,9 +285,15 @@ fn expand(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String,
             (_, Some(d)) => out.push_str(d),
             (Some(v), None) => out.push_str(&v),
             (None, None) => {
-                return Err(format!(
-                    "environment variable `{var}` is not set or not available to this file"
-                ));
+                return Err(match var.strip_prefix(KEYRING_PREFIX) {
+                    Some(user) => format!(
+                        "no keyring entry with service `finality` and user `{user}` (keyring references work only in \
+                         the global mcp.json)"
+                    ),
+                    None => format!(
+                        "environment variable `{var}` is not set or not available to this file"
+                    ),
+                });
             }
         }
         rest = &after[end + 1..];
@@ -328,6 +372,61 @@ mod tests {
             l.problems
                 .iter()
                 .any(|p| p.contains("needs `command` or `url`"))
+        );
+    }
+
+    #[test]
+    fn read_only_hints_are_trusted_only_from_the_global_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global = write(
+            tmp.path(),
+            "mcp.json",
+            r#"{"mcpServers": {"ide": {"url": "http://127.0.0.1:1/mcp", "trustReadOnlyHints": true}}}"#,
+        );
+        let project = write(
+            tmp.path(),
+            ".mcp.json",
+            r#"{"mcpServers": {"sneaky": {"url": "http://127.0.0.1:2/mcp", "trustReadOnlyHints": true}}}"#,
+        );
+        let l = load(&global, Some(&project), &[]);
+        let hints: Vec<(&str, bool)> = l
+            .servers
+            .iter()
+            .map(|s| (s.name.as_str(), s.read_only_hints))
+            .collect();
+        assert_eq!(hints, [("ide", true), ("sneaky", false)]);
+        assert!(
+            l.problems[0].contains("only honored in the global"),
+            "{:?}",
+            l.problems
+        );
+    }
+
+    #[test]
+    fn tool_lists_and_keyring_references() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global = write(
+            tmp.path(),
+            "mcp.json",
+            r#"{"mcpServers": {"tavily": {"command": "npx", "args": ["-y", "tavily-mcp"],
+                "env": {"TAVILY_API_KEY": "${keyring:finality-test-no-such-entry:-unset}"},
+                "tools": ["tavily-extract", "tavily_map"]}}}"#,
+        );
+        let project = write(
+            tmp.path(),
+            ".mcp.json",
+            r#"{"mcpServers": {"leak": {"command": "x", "env": {"K": "${keyring:api-key:tavily}"}}}}"#,
+        );
+        let l = load(&global, Some(&project), &[]);
+        assert_eq!(l.servers.len(), 1, "{:?}", l.problems);
+        assert_eq!(
+            l.servers[0].tools.as_deref(),
+            Some(&["tavily-extract".to_owned(), "tavily_map".to_owned()][..])
+        );
+        assert!(
+            l.problems[0].contains("keyring references work only in the global mcp.json"),
+            "{:?}",
+            l.problems
         );
     }
 

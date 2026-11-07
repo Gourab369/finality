@@ -287,7 +287,8 @@ async fn anthropic_streams_tool_calls_with_usage() {
         }
     );
     let body = &bodies(&server).await[0];
-    assert_eq!(body["system"], "sys");
+    assert_eq!(body["system"][0]["text"], "sys");
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
 }
@@ -348,6 +349,7 @@ async fn anthropic_sends_signed_thinking_back_in_tool_loops() {
     assert_eq!(sent["messages"][1]["content"][1]["type"], "tool_use");
     assert_eq!(
         sent["messages"][2]["content"][0],
-        json!({ "type": "tool_result", "tool_use_id": "toolu_7", "content": "contents of a" })
+        json!({ "type": "tool_result", "tool_use_id": "toolu_7", "content": "contents of a",
+                "cache_control": { "type": "ephemeral" } })
     );
 }

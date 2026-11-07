@@ -206,7 +206,12 @@ fn think_value(level: ThinkLevel, info: &ModelInfo) -> Option<Value> {
 fn message_json(m: &Message) -> Value {
     match m {
         Message::System { content } => json!({ "role": "system", "content": content }),
-        Message::User { content } => json!({ "role": "user", "content": content }),
+        Message::User { content, images } if !images.is_empty() => json!({
+            "role": "user",
+            "content": content,
+            "images": images.iter().map(|i| i.base64.as_str()).collect::<Vec<_>>(),
+        }),
+        Message::User { content, .. } => json!({ "role": "user", "content": content }),
         Message::Assistant {
             content,
             tool_calls,

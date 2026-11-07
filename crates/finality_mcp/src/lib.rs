@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod config;
 pub mod hub;
+pub mod ide;
 pub mod tool;
 
 pub use auth::{KeyringVault, MemoryVault, TokenVault, open_browser};

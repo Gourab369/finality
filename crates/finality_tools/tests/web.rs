@@ -15,7 +15,7 @@ use finality_tools::{
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{body_partial_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Default)]
@@ -114,6 +114,13 @@ const DDG_PAGE: &str = r##"<html><body>
   </div>
 </body></html>"##;
 
+fn ddg_web() -> WebConfig {
+    WebConfig {
+        search_backend: SearchBackend::DuckDuckGo,
+        ..WebConfig::default()
+    }
+}
+
 #[tokio::test]
 async fn duckduckgo_results_are_parsed() {
     let server = MockServer::start().await;
@@ -125,8 +132,7 @@ async fn duckduckgo_results_are_parsed() {
         .mount(&server)
         .await;
     let f = fx(WebConfig::default(), BrowserConfig::default());
-    let tool =
-        WebSearch::new(WebConfig::default()).with_duckduckgo_url(format!("{}/html/", server.uri()));
+    let tool = WebSearch::new(ddg_web()).with_duckduckgo_url(format!("{}/html/", server.uri()));
 
     let out = direct(&tool, json!({ "query": "zig build system" }), &f.ctx).await;
     assert!(!out.is_error, "{}", out.content);
@@ -144,6 +150,133 @@ async fn duckduckgo_results_are_parsed() {
     )
     .await;
     assert!(!one.content.contains("Second hit"));
+
+    let again = direct(&tool, json!({ "query": "zig build system" }), &f.ctx).await;
+    assert_eq!(
+        again.content, out.content,
+        "served from the cache (the mock expects 2 requests)"
+    );
+}
+
+const DDG_BOT_CHECK: &str = r#"<html><body><form id="challenge-form">
+  <div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div></form></body></html>"#;
+
+const DDG_LITE_PAGE: &str = r#"<table>
+  <tr><td>1.</td><td><a class="result-link" href="https://ziglang.org/">Zig</a></td></tr>
+  <tr><td></td><td class="result-snippet">A general-purpose language.</td></tr>
+</table>"#;
+
+#[tokio::test]
+async fn duckduckgo_bot_checks_fall_back_to_lite_and_are_reported() {
+    let server = MockServer::start().await;
+    Mock::given(path("/html/"))
+        .respond_with(ResponseTemplate::new(202).set_body_string(DDG_BOT_CHECK))
+        .mount(&server)
+        .await;
+    Mock::given(path("/lite/"))
+        .and(query_param("q", "zig"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(DDG_LITE_PAGE))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/lite/"))
+        .and(query_param("q", "blocked"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(DDG_BOT_CHECK))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let f = fx(WebConfig::default(), BrowserConfig::default());
+    let tool = WebSearch::new(ddg_web())
+        .with_duckduckgo_url(format!("{}/html/", server.uri()))
+        .with_duckduckgo_lite_url(format!("{}/lite/", server.uri()))
+        .with_retry_delay(std::time::Duration::ZERO);
+
+    let out = direct(&tool, json!({ "query": "zig" }), &f.ctx).await;
+    assert_eq!(
+        out.content,
+        "1. Zig\n   https://ziglang.org/\n   A general-purpose language."
+    );
+    let blocked = direct(&tool, json!({ "query": "blocked" }), &f.ctx).await;
+    assert!(
+        blocked.is_error && blocked.content.contains("refusing automated searches"),
+        "{}",
+        blocked.content
+    );
+}
+
+#[tokio::test]
+async fn tavily_is_used_with_a_key_and_falls_back_to_duckduckgo() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .and(header("authorization", "Bearer tvly-good"))
+        .and(body_partial_json(json!({ "query": "rust async", "max_results": 8 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "query": "rust async",
+            "results": [
+                { "title": "Async Book", "url": "https://rust-lang.github.io/async-book/", "content": "Asynchronous   Programming in Rust", "score": 0.9 }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(
+            json!({ "detail": { "error": "Unauthorized: missing or invalid API key." } }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(path("/html/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(DDG_PAGE))
+        .mount(&server)
+        .await;
+    let f = fx(WebConfig::default(), BrowserConfig::default());
+    let tavily = |key: Option<&str>| {
+        WebSearch::new(WebConfig::default())
+            .with_tavily(format!("{}/search", server.uri()), key.map(str::to_owned))
+            .with_duckduckgo_url(format!("{}/html/", server.uri()))
+    };
+
+    let out = direct(
+        &tavily(Some("tvly-good")),
+        json!({ "query": "rust async" }),
+        &f.ctx,
+    )
+    .await;
+    assert_eq!(
+        out.content,
+        "1. Async Book\n   https://rust-lang.github.io/async-book/\n   Asynchronous Programming in Rust"
+    );
+    let fallback = direct(&tavily(Some("tvly-bad")), json!({ "query": "zig" }), &f.ctx).await;
+    assert!(
+        fallback.content.starts_with(
+            "(Tavily returned 401 Unauthorized: Unauthorized: missing or invalid API key.; these results are from DuckDuckGo)\n1. Zig Build System"
+        ),
+        "{}",
+        fallback.content
+    );
+    assert!(
+        !fallback.content.contains("tvly-bad"),
+        "the key never shows"
+    );
+    let no_key = direct(&tavily(None), json!({ "query": "zig" }), &f.ctx).await;
+    assert!(
+        no_key.content.starts_with("1. Zig Build System"),
+        "{}",
+        no_key.content
+    );
+
+    let required = WebSearch::new(WebConfig {
+        search_backend: SearchBackend::Tavily,
+        ..WebConfig::default()
+    })
+    .with_tavily(format!("{}/search", server.uri()), None);
+    let missing = direct(&required, json!({ "query": "zig" }), &f.ctx).await;
+    assert!(
+        missing.is_error && missing.content.contains("TAVILY_API_KEY"),
+        "{}",
+        missing.content
+    );
 }
 
 #[tokio::test]
@@ -333,6 +466,111 @@ async fn fetch_output_is_truncated_to_max_chars() {
     .await;
     assert!(out.truncated);
     assert!(out.content.chars().count() < 1100);
+}
+
+#[tokio::test]
+async fn long_pages_are_read_in_parts_from_the_cache() {
+    let server = MockServer::start().await;
+    let lines: Vec<String> = (1..=300)
+        .map(|n| format!("line {n:03} of the manual"))
+        .collect();
+    Mock::given(path("/manual.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(lines.join("\n"), "text/plain"))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let f = fx(private_web(), BrowserConfig::default());
+    let tool = WebFetch::new(&private_web());
+    let url = format!("{}/manual.txt", server.uri());
+
+    let first = direct(&tool, json!({ "url": url, "max_chars": 1000 }), &f.ctx).await;
+    assert!(first.truncated);
+    let next: usize = first
+        .content
+        .rsplit("offset ")
+        .next()
+        .and_then(|s| s.split_whitespace().next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(first.content.contains("line 001") && !first.content.contains("line 300"));
+    let body_end = first.content.rfind("\n\n[characters").unwrap();
+    assert!(
+        first.content[..body_end].ends_with("of the manual"),
+        "cut at a line end"
+    );
+
+    let second = direct(
+        &tool,
+        json!({ "url": url, "max_chars": 1000, "offset": next }),
+        &f.ctx,
+    )
+    .await;
+    assert!(
+        second.content.contains("Cached: fetched"),
+        "{}",
+        second.content
+    );
+    let first_line = second
+        .content
+        .split("\n\n")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap();
+    assert!(
+        first_line.starts_with("line "),
+        "continues at a line start: {first_line}"
+    );
+    assert!(
+        !first.content.contains(first_line),
+        "no overlap: {first_line}"
+    );
+
+    let end = direct(&tool, json!({ "url": url, "offset": 1_000_000 }), &f.ctx).await;
+    assert!(end.content.contains("past the end"), "{}", end.content);
+    let fresh = direct(&tool, json!({ "url": url, "refresh": true }), &f.ctx).await;
+    assert!(!fresh.content.contains("Cached:"));
+}
+
+#[tokio::test]
+async fn fetched_html_is_markdown_without_page_chrome() {
+    let server = MockServer::start().await;
+    let body = format!(
+        "<html><head><title>Guide</title></head><body><nav><a href='/'>Home</a></nav>\
+         <main><h2>Install</h2><p>{}</p><pre><code class='language-sh'>cargo install finality</code></pre>\
+         <p>See <a href='/docs/setup'>setup</a>.</p></main><footer>© Example</footer></body></html>",
+        "Finality installs with cargo. ".repeat(10)
+    );
+    Mock::given(path("/guide"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/html"))
+        .mount(&server)
+        .await;
+    let f = fx(private_web(), BrowserConfig::default());
+    let out = direct(
+        &WebFetch::new(&private_web()),
+        json!({ "url": format!("{}/guide", server.uri()) }),
+        &f.ctx,
+    )
+    .await;
+    let text = out.content;
+    assert!(
+        text.contains("Title: Guide\n\n## Install\n\nFinality installs"),
+        "{text}"
+    );
+    assert!(
+        text.contains("```sh\ncargo install finality\n```"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("See [setup]({}/docs/setup).", server.uri())),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Home") && !text.contains("Example"),
+        "{text}"
+    );
 }
 
 #[tokio::test]

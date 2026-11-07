@@ -2,6 +2,7 @@
 //! Talks to the core only through `UiEvent` / `CoreCommand`.
 
 pub mod app;
+pub mod clipboard;
 pub mod format;
 pub mod markdown;
 pub mod slash;

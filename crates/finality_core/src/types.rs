@@ -121,6 +121,20 @@ impl Default for Mode {
     }
 }
 
+impl Mode {
+    /// The modes users choose from; `auto-edit` was merged into `cowork` in v0.3.
+    pub const CHOICES: &'static [Mode] = &[Mode::Plan, Mode::Cowork, Mode::Auto];
+
+    /// `auto-edit` behaves as `cowork`. The variant stays so session logs written before v0.3 still decode.
+    pub fn canonical(self) -> Self {
+        if self == Mode::AutoEdit {
+            Mode::Cowork
+        } else {
+            self
+        }
+    }
+}
+
 #[allow(clippy::derivable_impls)]
 impl Default for ThinkLevel {
     fn default() -> Self {

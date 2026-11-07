@@ -127,6 +127,7 @@ fn system_prompt(
     custom: Option<&CustomAgent>,
     skills: &[&Skill],
     direct: bool,
+    instructions: Option<&str>,
 ) -> String {
     let template = if role == Role::Research {
         include_str!("../prompts/research.md")
@@ -137,6 +138,9 @@ fn system_prompt(
     if direct {
         prompt.push('\n');
         prompt.push_str(crate::DIRECT_PROMPT);
+    }
+    if let Some(text) = instructions {
+        prompt.push_str(text);
     }
     if let Some(a) = custom {
         let _ = write!(
@@ -409,6 +413,8 @@ async fn attempt(
             job.custom.as_ref(),
             &skills,
             d.direct.load(Ordering::Relaxed),
+            crate::instructions::load(&d.data.instructions_file(), d.tool_env.guard.workdir())
+                .as_deref(),
         ),
         &d.tool_env.guard.workdir().display().to_string(),
     ));

@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use finality_llm::{Message, ToolCall};
+use finality_llm::{ImageData, Message, ToolCall};
 use finality_memory::decision::heuristic_summary;
 use finality_store::{Record, RecordEnvelope};
 
@@ -54,6 +54,8 @@ fn exchange_note(messages: &[Message]) -> String {
 
 fn message_chars(m: &Message) -> usize {
     match m {
+        // Roughly 1,500 tokens per image.
+        Message::User { content, images } => content.len() + images.len() * 6000,
         Message::Assistant {
             content,
             tool_calls,
@@ -117,12 +119,24 @@ impl Conversation {
     }
 
     pub fn begin_exchange(&mut self, user: &str) {
+        self.begin_exchange_with(user, Vec::new());
+    }
+
+    pub fn begin_exchange_with(&mut self, user: &str, images: Vec<ImageData>) {
         self.exchange_starts.push(self.messages.len());
-        self.messages.push(Message::user(user));
+        self.messages.push(Message::user_with_images(user, images));
     }
 
     pub fn push(&mut self, m: Message) {
         self.messages.push(m);
+    }
+
+    /// The latest system message in context that starts with `prefix`.
+    pub fn last_system_note(&self, prefix: &str) -> Option<&str> {
+        self.messages.iter().rev().find_map(|m| match m {
+            Message::System { content } if content.starts_with(prefix) => Some(content.as_str()),
+            _ => None,
+        })
     }
 
     /// Events of this session from `main.events`, used to describe exchanges no longer in context.
@@ -195,19 +209,33 @@ impl Conversation {
     pub fn compact(&mut self, budget: u32, extra_chars: usize, keep: usize) -> usize {
         let mut dropped = 0;
         while self.estimate(extra_chars) > budget && self.exchange_starts.len() > keep.max(1) {
-            let cut = self.exchange_starts[1];
-            let note = exchange_note(&self.messages[..cut]);
-            self.dropped_notes
-                .push((u32::try_from(self.omitted).unwrap_or(u32::MAX), note));
-            self.messages.drain(..cut);
-            self.exchange_starts.remove(0);
-            for s in &mut self.exchange_starts {
-                *s -= cut;
-            }
-            self.omitted += 1;
+            self.drop_oldest();
             dropped += 1;
         }
         dropped
+    }
+
+    /// Moves all but the last `keep` exchanges out of context, whatever their size (`/compact`).
+    pub fn compact_to(&mut self, keep: usize) -> usize {
+        let mut dropped = 0;
+        while self.exchange_starts.len() > keep.max(1) {
+            self.drop_oldest();
+            dropped += 1;
+        }
+        dropped
+    }
+
+    fn drop_oldest(&mut self) {
+        let cut = self.exchange_starts[1];
+        let note = exchange_note(&self.messages[..cut]);
+        self.dropped_notes
+            .push((u32::try_from(self.omitted).unwrap_or(u32::MAX), note));
+        self.messages.drain(..cut);
+        self.exchange_starts.remove(0);
+        for s in &mut self.exchange_starts {
+            *s -= cut;
+        }
+        self.omitted += 1;
     }
 
     /// Plain-text tail of recent user/assistant messages, for triage context.
@@ -215,7 +243,7 @@ impl Conversation {
         let mut out = String::new();
         for m in &self.messages {
             match m {
-                Message::User { content } => out.push_str(&format!("user: {content}\n")),
+                Message::User { content, .. } => out.push_str(&format!("user: {content}\n")),
                 Message::Assistant { content, .. } if !content.is_empty() => {
                     out.push_str(&format!("assistant: {content}\n"));
                 }

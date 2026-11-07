@@ -182,6 +182,9 @@ fn setup(
     std::fs::create_dir_all(&work).unwrap();
     let data = DataDir::new(root.join("data"));
     data.ensure().unwrap();
+    // Scripted providers expect a triage request for every prompt.
+    let mut config = config;
+    config.llm.quick_triage = false;
     let deps = CoreDeps {
         config,
         workspace: Workspace::from_dir(&work).unwrap(),
@@ -454,7 +457,7 @@ async fn interjection_reaches_the_running_turn() {
         let has_interjection = req
             .messages
             .iter()
-            .any(|m| matches!(m, Message::User { content } if content.starts_with("[User interjection] stop")));
+            .any(|m| matches!(m, Message::User { content, .. } if content.starts_with("[User interjection] stop")));
         if has_interjection {
             return Reply::Text("Stopping as asked.".into());
         }

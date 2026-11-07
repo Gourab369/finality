@@ -35,6 +35,10 @@ impl ToolRegistry {
         r.register(Arc::new(crate::search::SearchFiles));
         r.register(Arc::new(crate::edit::EditFile));
         r.register(Arc::new(crate::shell::Shell));
+        r.register(Arc::new(crate::checkpoint::CheckpointList));
+        r.register(Arc::new(crate::checkpoint::CheckpointRestore));
+        r.register(Arc::new(crate::git::Git));
+        r.register(Arc::new(crate::git::GitCommit));
         r
     }
 

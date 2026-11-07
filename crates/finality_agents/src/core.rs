@@ -13,7 +13,8 @@ use finality_core::events::{
 };
 use finality_core::{AgentId, Mode, ProviderKind, Role, SessionId, ThinkLevel, Workspace};
 use finality_llm::{
-    ApiKeys, EnvOrKeyring, LlmError, LlmProvider, Message, ModelSelector, ProviderRouter,
+    ApiKeys, EnvOrKeyring, ImageData, LlmError, LlmProvider, Message, ModelRef, ModelSelector,
+    ProviderRouter,
 };
 use finality_mcp::{
     HubSettings, KeyringVault, McpHub, Origin as McpOrigin, ServerState, ServerStatus,
@@ -31,8 +32,8 @@ use finality_store::{
     ActiveSession, DataDir, McpTrust, Record, SessionStart, SessionStore, write_atomic,
 };
 use finality_tools::{
-    ActiveToolSet, Approver, BrowserSession, TOOL_SEARCH, Tier, Tool, ToolCtx, ToolEnv,
-    ToolExecutor, ToolLimits, ToolRegistry, ToolSearch, ToolSets, ToolSource, ToolSpec,
+    ActiveToolSet, Approver, BrowserSession, Checkpoints, TOOL_SEARCH, Tier, Tool, ToolCtx,
+    ToolEnv, ToolExecutor, ToolLimits, ToolRegistry, ToolSearch, ToolSets, ToolSource, ToolSpec,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -57,7 +58,10 @@ use crate::subagent::SUBAGENT_TOOLS;
 use crate::supervisor::{Supervisor, SupervisorDeps};
 use crate::triage::{self, Complexity, Triage};
 
-const RESUME_EXCHANGES: usize = 6;
+/// Exchanges a resumed session keeps verbatim; earlier ones are represented by Memory events.
+const RESUME_EXCHANGES: usize = 2;
+/// Exchanges `/compact` keeps verbatim.
+const COMPACT_KEEP: usize = 2;
 const QUIT_WAIT: Duration = Duration::from_secs(10);
 const MAX_STEPS: u32 = 25;
 const MAX_TOOL_CALLS: u32 = 50;
@@ -72,6 +76,9 @@ const LEARNER_WAIT: Duration = Duration::from_secs(5);
 const SCRATCH_ORPHAN_AGE: Duration = Duration::from_secs(3600);
 /// Sessions offered by `/resume` without an id.
 const PICKER_SESSIONS: usize = 50;
+/// Paths offered for `@`-mention completion.
+const MENTION_FILES: usize = 20_000;
+const TOOLS_NOTE: &str = "[Loadable tools]";
 
 pub struct CoreDeps {
     pub config: Config,
@@ -155,8 +162,12 @@ pub struct Core {
     choose_model: bool,
     /// The start-up model picker is open; prompts wait in `queued` until a model is chosen.
     awaiting_model: bool,
+    /// `/compact` is waiting for the Memory agent for this session; prompts wait in `queued`.
+    compacting: Option<SessionId>,
     /// Direct mode, shared with sub-agents; saved in `state.json`.
     direct: Arc<AtomicBool>,
+    /// System notes for the next turn (e.g. after `/undo`).
+    pending_notes: Vec<String>,
 }
 
 impl Core {
@@ -178,7 +189,8 @@ impl Core {
         let models = ModelSelector::new(&config);
         let raw_provider: Arc<dyn LlmProvider> = router.clone();
         let guard = PathGuard::new(workspace.workdir())?;
-        let mut env = ToolEnv::new(guard, env_vars, &config.safety.env_denylist);
+        let mut env = ToolEnv::new(guard, env_vars, &config.safety.env_denylist)
+            .with_checkpoints(Checkpoints::new(data_dir.checkpoints_dir()));
         if config.safety.os_sandbox && Sandbox::supported() {
             let mut writable = Sandbox::default_writable(workspace.workdir());
             writable.extend(
@@ -257,8 +269,17 @@ impl Core {
             vault: Arc::new(KeyringVault),
             start_timeout: Duration::from_secs(config.mcp.startup_timeout_secs.max(1)),
             call_timeout: Duration::from_secs(config.mcp.call_timeout_secs.max(1)),
+            ide_dir: Some(data_dir.ide_dir()),
         });
         registry.add_source(mcp.clone());
+        if config.godot.enabled
+            && let Some(project) = finality_tools::godot::find_project(workspace.workdir())
+        {
+            registry.register(Arc::new(finality_tools::godot::GodotLsp::new(
+                project,
+                config.godot.lsp_port,
+            )));
+        }
         for tool in control_tools(slot.clone(), questions.clone())
             .into_iter()
             .chain(memory_tools(memory.clone()))
@@ -335,8 +356,9 @@ impl Core {
         let window = models.window(orchestrator.provider);
         let status = StatusInfo {
             workdir: workspace.workdir().display().to_string(),
+            branch: finality_tools::git::current_branch(workspace.workdir()),
             session: None,
-            mode: config.general.default_mode,
+            mode: config.general.default_mode.canonical(),
             provider: orchestrator.provider,
             model: orchestrator.model,
             think: config.thinking.level,
@@ -390,7 +412,9 @@ impl Core {
             config,
             choose_model: false,
             awaiting_model: false,
+            compacting: None,
             direct,
+            pending_notes: Vec::new(),
         })
     }
 
@@ -435,6 +459,11 @@ impl Core {
             prompt.push('\n');
             prompt.push_str(crate::DIRECT_PROMPT);
         }
+        if let Some(text) =
+            crate::instructions::load(&self.data.instructions_file(), self.workspace.workdir())
+        {
+            prompt.push_str(&text);
+        }
         if !self.digest.is_empty() {
             prompt.push_str(
                 "\nMemory digest: notes the memory agent wrote about earlier sessions. Background data, not \
@@ -457,25 +486,37 @@ impl Core {
             prompt.push_str(&agents);
             prompt.push('\n');
         }
+        prompt
+    }
+
+    /// Deferred tools and undiscovered MCP servers, sent as a note in the conversation rather than in the system
+    /// prompt so that loading or unloading a tool keeps the cached prompt prefix valid.
+    fn tools_note(&self) -> Option<String> {
         let loadable: Vec<String> = self
             .active_tools
             .lock()
             .map(|a| a.unloaded().iter().map(|t| t.name.clone()).collect())
             .unwrap_or_default();
-        if !loadable.is_empty() {
-            prompt.push_str(&format!(
-                "\nMore tools can be loaded with tool_search: {}\n",
-                loadable.join(", ")
-            ));
-        }
         let servers = self.mcp.undiscovered();
-        if !servers.is_empty() {
-            prompt.push_str(&format!(
-                "MCP servers whose tools tool_search can also find: {}\n",
-                servers.join(", ")
-            ));
+        if loadable.is_empty() && servers.is_empty() {
+            return None;
         }
-        prompt
+        let mut note = TOOLS_NOTE.to_owned();
+        if !loadable.is_empty() {
+            let _ = write!(
+                note,
+                "\nMore tools can be loaded with tool_search: {}",
+                loadable.join(", ")
+            );
+        }
+        if !servers.is_empty() {
+            let _ = write!(
+                note,
+                "\nMCP servers whose tools tool_search can also find: {}",
+                servers.join(", ")
+            );
+        }
+        Some(note)
     }
 
     fn session_ctx(&self) -> Option<SessionCtx> {
@@ -588,13 +629,13 @@ impl Core {
                         None => Flow::Quit,
                     };
                     if matches!(flow, Flow::Quit) {
-                        self.shutdown(&mut done_rx).await;
+                        self.shutdown(&mut done_rx, &mut commands).await;
                         return;
                     }
                 }
                 Some(cmd) = internal.recv() => {
                     if matches!(self.handle(cmd, &done_tx).await, Flow::Quit) {
-                        self.shutdown(&mut done_rx).await;
+                        self.shutdown(&mut done_rx, &mut commands).await;
                         return;
                     }
                 }
@@ -710,10 +751,18 @@ impl Core {
         self.recover_crashed_sessions();
         self.finalize_pending_memory();
         self.send_skills();
+        self.send_files();
         if self.direct.load(Ordering::Relaxed) {
             self.send(UiEvent::DirectChanged { on: true });
         }
         self.scorer.catch_up();
+        let unlearned = self.learner.catch_up();
+        if unlearned > 0 {
+            tracing::info!(
+                events = unlearned,
+                "queued events the learner has not processed yet"
+            );
+        }
         if self.choose_model {
             self.status.model.clear();
             self.awaiting_model = true;
@@ -901,6 +950,12 @@ impl Core {
                         NoticeLevel::Info,
                         "choose a model first; the message is sent once one is selected",
                     );
+                } else if self.compacting.is_some() {
+                    self.queued.push_back(text);
+                    self.notice(
+                        NoticeLevel::Info,
+                        "compacting the context; the message is sent when it is done",
+                    );
                 } else {
                     self.start_turn(text, done_tx).await;
                 }
@@ -926,6 +981,9 @@ impl Core {
             }
             CoreCommand::Slash(SlashCommand::Skill { name, args }) => {
                 self.run_skill(&name, &args, done_tx).await;
+            }
+            CoreCommand::Slash(SlashCommand::CompactApply { finished }) => {
+                self.apply_compaction(finished, done_tx).await;
             }
             CoreCommand::Slash(cmd) => self.slash(cmd).await,
         }
@@ -956,6 +1014,14 @@ impl Core {
             text: format!("/{name} {}", args.trim()).trim_end().to_owned(),
         });
         Box::pin(self.handle(CoreCommand::UserPrompt(prompt), done_tx)).await;
+    }
+
+    fn send_files(&self) {
+        let (workdir, ui) = (self.workspace.workdir().to_owned(), self.ui.clone());
+        tokio::task::spawn_blocking(move || {
+            let files = finality_tools::search::list_paths(&workdir, None, MENTION_FILES);
+            let _ = ui.send(UiEvent::Files(files));
+        });
     }
 
     fn send_skills(&self) {
@@ -1370,6 +1436,7 @@ impl Core {
             SlashCommand::New
             | SlashCommand::Resume { id: Some(_) }
             | SlashCommand::ResumeHere { .. }
+            | SlashCommand::Undo(_)
                 if busy =>
             {
                 self.notice(
@@ -1415,6 +1482,19 @@ impl Core {
             SlashCommand::Model(model) => self.set_model(model).await,
             SlashCommand::ChooseModel => self.open_model_picker(),
             SlashCommand::Context => self.show_context(),
+            SlashCommand::Compact => self.start_compaction(),
+            SlashCommand::Checkpoints => {
+                let text = self
+                    .tool_env
+                    .checkpoints
+                    .as_ref()
+                    .map_or_else(|| "checkpoints are off".to_owned(), |c| c.describe());
+                self.notice(NoticeLevel::Info, text);
+            }
+            SlashCommand::Undo(n) => self.undo(n),
+            SlashCommand::Diff => self.show_diff(),
+            // Handled in `handle`, which can start the queued turn afterwards.
+            SlashCommand::CompactApply { .. } => {}
             SlashCommand::Memory { recall: None } => {
                 let digest = self.memory_digest();
                 let mut text = if digest.is_empty() {
@@ -1489,6 +1569,7 @@ impl Core {
     }
 
     fn set_mode(&mut self, mode: Mode) {
+        let mode = mode.canonical();
         if let Ok(mut p) = self.permissions.lock() {
             p.set_mode(mode);
         }
@@ -1528,16 +1609,105 @@ impl Core {
         );
     }
 
+    /// Size of the Orchestrator's tool schemas, for context estimates.
+    fn tool_schema_chars(&self) -> usize {
+        let mut specs = self.orchestrator_tools.clone();
+        if let Ok(a) = self.active_tools.lock() {
+            specs.extend(a.loaded_specs());
+        }
+        serde_json::to_string(&crate::engine::tool_schemas(&specs)).map_or(0, |s| s.len())
+    }
+
+    /// `/compact`: asks the Memory agent to file every exchange so far into events, off the core loop.
+    fn start_compaction(&mut self) {
+        if self.compacting.is_some() {
+            return self.notice(NoticeLevel::Info, "already compacting");
+        }
+        if self.turn_cancel.is_some() || self.supervisor.has_active() {
+            return self.notice(
+                NoticeLevel::Warning,
+                "work is still running; compact when it has finished",
+            );
+        }
+        let (Some(conv), Some(session)) = (&self.conversation, self.session_ctx()) else {
+            return self.notice(NoticeLevel::Info, "nothing to compact yet");
+        };
+        if conv.exchanges() <= COMPACT_KEEP {
+            return self.notice(
+                NoticeLevel::Info,
+                format!(
+                    "nothing to compact: only {} exchange(s) in context",
+                    conv.exchanges()
+                ),
+            );
+        }
+        let upto = u32::try_from(conv.omitted() + conv.exchanges()).unwrap_or(u32::MAX);
+        let id = session.id;
+        let job = if self.memory_started {
+            MemoryJob::UserExchanges { session, upto }
+        } else {
+            self.memory_started = true;
+            MemoryJob::SessionStart { session, upto }
+        };
+        self.memory.submit(job);
+        self.compacting = Some(id);
+        self.notice(
+            NoticeLevel::Info,
+            "compacting: the memory agent is summarizing this conversation into events…",
+        );
+        let (memory, internal) = (self.memory.clone(), self.internal_tx.clone());
+        let wait = Duration::from_secs(self.config.memory.quit_wait_secs.max(1));
+        tokio::spawn(async move {
+            let finished = memory.wait_idle(wait).await;
+            let _ = internal.send(CoreCommand::Slash(SlashCommand::CompactApply { finished }));
+        });
+    }
+
+    /// Keeps the last `COMPACT_KEEP` exchanges and describes the rest with this session's memory events.
+    async fn apply_compaction(
+        &mut self,
+        finished: bool,
+        done_tx: &mpsc::UnboundedSender<TurnDone>,
+    ) {
+        let target = self.compacting.take();
+        let tools = self.tool_schema_chars();
+        let events = self.earlier_events();
+        if let Some(conv) = self
+            .conversation
+            .as_mut()
+            .filter(|_| target.is_some() && target == self.status.session)
+        {
+            let before = conv.estimate(tools);
+            conv.set_memory(events);
+            let dropped = conv.compact_to(COMPACT_KEEP);
+            let after = conv.estimate(tools);
+            self.usage.ctx_used = after.min(self.window);
+            self.send(UiEvent::Usage(self.usage));
+            if !finished {
+                self.notice(
+                    NoticeLevel::Warning,
+                    "the memory agent did not finish in time; exchanges it has not summarized are kept as one-line notes",
+                );
+            }
+            self.notice(
+                NoticeLevel::Info,
+                format!(
+                    "compacted: {dropped} exchange(s) now come from memory events; context ≈ {after} tokens (was ≈ {before})"
+                ),
+            );
+        }
+        if self.turn_cancel.is_none()
+            && let Some(next) = self.queued.pop_front()
+        {
+            self.start_turn(next, done_tx).await;
+        }
+    }
+
     fn show_context(&self) {
         let mut text = format!("context window: {} tokens\n", self.window);
         match &self.conversation {
             Some(c) => {
-                let mut specs = self.orchestrator_tools.clone();
-                if let Ok(a) = self.active_tools.lock() {
-                    specs.extend(a.loaded_specs());
-                }
-                let tools = serde_json::to_string(&crate::engine::tool_schemas(&specs))
-                    .map_or(0, |s| s.len());
+                let tools = self.tool_schema_chars();
                 let _ = write!(
                     text,
                     "system prompt ≈ {} · tool schemas ≈ {} · history ≈ {} ({} exchange(s), {} left out)\nestimated next request ≈ {} tokens",
@@ -1750,6 +1920,7 @@ impl Core {
         match started {
             Ok(s) => {
                 self.status.session = Some(s.id);
+                self.set_checkpoint_session(Some(s.id));
                 self.send(UiEvent::SessionStarted { id: s.id });
                 self.send(UiEvent::Status(self.status.clone()));
                 self.session = Some(s);
@@ -1773,6 +1944,7 @@ impl Core {
             return;
         };
         let id = session.id;
+        self.set_checkpoint_session(None);
         self.supervisor.reset();
         self.supervisor.set_session(None);
         if let Err(e) = self.store.close(session, self.agent, reason).await {
@@ -1867,6 +2039,7 @@ impl Core {
         let recent = contents.last_exchanges(RESUME_EXCHANGES);
         self.reset_loaded_tools();
         self.status.session = Some(id);
+        self.set_checkpoint_session(Some(id));
         self.session = Some(session);
         // Already filed (or filed by the next UserExchanges job if memory never ran).
         self.memory_started = true;
@@ -1887,11 +2060,57 @@ impl Core {
         self.send(UiEvent::Status(self.status.clone()));
         self.notice(
             NoticeLevel::Info,
-            format!(
-                "resumed {id}: loaded the last {} of {total} exchange(s)",
-                recent.len()
-            ),
+            if total > recent.len() {
+                format!(
+                    "resumed {id}: loaded the last {} of {total} exchange(s); earlier ones come from memory events",
+                    recent.len()
+                )
+            } else {
+                format!("resumed {id}: loaded {total} exchange(s)")
+            },
         );
+    }
+
+    fn set_checkpoint_session(&self, id: Option<SessionId>) {
+        if let Some(c) = &self.tool_env.checkpoints {
+            c.set_session(id.map(|id| id.to_string()).as_deref());
+        }
+    }
+
+    /// `/undo [n]`: restores files and tells the Orchestrator on its next turn.
+    fn undo(&mut self, n: Option<u32>) {
+        let Some(cps) = self.tool_env.checkpoints.clone() else {
+            return self.notice(NoticeLevel::Info, "checkpoints are off");
+        };
+        let Some(id) = n.or_else(|| cps.list().last().map(|c| c.id)) else {
+            return self.notice(NoticeLevel::Info, "nothing to undo in this session");
+        };
+        match cps.restore(id) {
+            Ok(files) => {
+                let files = files.join(", ");
+                self.notice(
+                    NoticeLevel::Info,
+                    format!("restored to before checkpoint {id}: {files}"),
+                );
+                self.pending_notes.push(format!(
+                    "The user ran /undo: {files} restored to how they were before checkpoint {id}. Your earlier \
+                     edits to them are gone; read the files again before editing them."
+                ));
+            }
+            Err(e) => self.notice(NoticeLevel::Error, format!("cannot undo: {e}")),
+        }
+    }
+
+    /// `/diff`: `git status` and the uncommitted diff of the working directory.
+    fn show_diff(&self) {
+        let (workdir, ui) = (self.workspace.workdir().to_owned(), self.ui.clone());
+        tokio::spawn(async move {
+            let (level, text) = match finality_tools::git::diff_summary(&workdir).await {
+                Ok(text) => (NoticeLevel::Info, text),
+                Err(e) => (NoticeLevel::Error, e),
+            };
+            let _ = ui.send(UiEvent::Notice { level, text });
+        });
     }
 
     async fn start_turn(&mut self, text: String, done_tx: &mpsc::UnboundedSender<TurnDone>) {
@@ -1903,6 +2122,30 @@ impl Core {
         }
         if !self.ensure_session().await {
             return;
+        }
+        if let Some(c) = &self.tool_env.checkpoints {
+            c.begin(&text);
+        }
+        let (attachments, mention_notes) = crate::mentions::attach(&text, &self.tool_env.guard);
+        let (images, image_notes) = crate::mentions::images(&text);
+        for note in mention_notes.into_iter().chain(image_notes) {
+            self.notice(NoticeLevel::Warning, note);
+        }
+        if !images.is_empty()
+            && self.status.provider == ProviderKind::Ollama
+            && let Ok(info) = self
+                .provider
+                .model_info_for(Some(self.status.provider), &self.status.model)
+                .await
+            && !info.supports_vision
+        {
+            self.notice(
+                NoticeLevel::Warning,
+                format!(
+                    "{} does not list vision support; the image(s) are sent anyway",
+                    self.status.model
+                ),
+            );
         }
         let Some(session) = &self.session else { return };
         let pool = self
@@ -1926,6 +2169,13 @@ impl Core {
             .unwrap_or_else(|| Conversation::new(String::new()));
         conversation.system = self.system_prompt();
         conversation.set_memory(self.earlier_events());
+        let mut notes = std::mem::take(&mut self.pending_notes);
+        // Repeated only when it changed since the last one still in context.
+        if let Some(note) = self.tools_note()
+            && conversation.last_system_note(TOOLS_NOTE) != Some(note.as_str())
+        {
+            notes.insert(0, note);
+        }
 
         let cancel = CancellationToken::new();
         self.turn_cancel = Some(cancel.clone());
@@ -1970,6 +2220,8 @@ impl Core {
             scorer_cfg: self.config.scorer.clone(),
             beat_interval: Duration::from_secs(self.config.agents.heartbeat_interval_secs.max(1)),
             triage: None,
+            quick_triage: self.config.llm.quick_triage,
+            triage_model: self.models.triage(),
             decider: self.decider.is_enabled().then(|| self.decider.clone()),
             decision_vocab: if self.decider.is_enabled() {
                 self.decision_vocab()
@@ -1978,6 +2230,9 @@ impl Core {
             },
             conversation,
             usage: self.usage,
+            notes,
+            attachments,
+            images,
             text,
         };
         let done_tx = done_tx.clone();
@@ -1997,6 +2252,13 @@ impl Core {
             .unwrap_or(u32::MAX);
         self.conversation = Some(done.conversation);
         self.board.remove(self.agent);
+        // The turn may have switched branches.
+        let branch = finality_tools::git::current_branch(self.workspace.workdir());
+        if branch != self.status.branch {
+            self.status.branch = branch;
+            self.send(UiEvent::Status(self.status.clone()));
+        }
+        self.send_files();
         self.supervisor.finalize(false);
         if self.session_hint.is_none() {
             self.session_hint = done.triage.map(|t| (t.query_type, t.topic));
@@ -2027,10 +2289,22 @@ impl Core {
         }
     }
 
-    async fn shutdown(&mut self, done_rx: &mut mpsc::UnboundedReceiver<TurnDone>) {
+    /// Stops work, closes the session and waits for its Memory summary so a resume loads events instead
+    /// of the whole conversation. Waiting ends early when the UI is gone (the user forced the quit).
+    async fn shutdown(
+        &mut self,
+        done_rx: &mut mpsc::UnboundedReceiver<TurnDone>,
+        commands: &mut mpsc::UnboundedReceiver<CoreCommand>,
+    ) {
+        let step = |core: &Self, text: &str| {
+            core.send(UiEvent::ShuttingDown {
+                step: text.to_owned(),
+            });
+        };
         self.monitor_stop.cancel();
         self.supervisor.cancel_all();
         if let Some(cancel) = self.turn_cancel.take() {
+            step(self, "Stopping the running turn…");
             cancel.cancel();
             self.approver.withdraw_all();
             self.questions.withdraw_all();
@@ -2044,18 +2318,63 @@ impl Core {
         }
         self.browser.close().await;
         self.mcp.shutdown().await;
+        let had_session = self.session.is_some();
         self.close_session("quit").await;
-        if !self.memory.wait_idle(MEMORY_WAIT).await {
+        // With a session, memory, Learner and Scorer share one budget; work left over is redone at the next start.
+        let started = tokio::time::Instant::now();
+        let budget = Duration::from_secs(self.config.memory.quit_wait_secs.max(1));
+        let left = |short: Duration| {
+            if had_session {
+                budget.saturating_sub(started.elapsed())
+            } else {
+                short
+            }
+        };
+        if had_session {
+            step(
+                self,
+                "Saving session memory: summarizing this conversation into events so it resumes quickly…",
+            );
+        }
+        let Some(memory_done) =
+            wait_or_ui_closed(self.memory.wait_idle(left(MEMORY_WAIT)), commands).await
+        else {
+            tracing::info!(
+                "quit without waiting; the next start finishes memory, learner and scorer jobs"
+            );
+            return self.finish_shutdown().await;
+        };
+        if !memory_done {
             tracing::warn!("memory jobs still running at exit; the next start finishes them");
         }
-        if !self.learner.wait_idle(LEARNER_WAIT).await {
-            tracing::warn!("the learner did not finish before exit");
+        if had_session && !self.learner.wait_idle(Duration::ZERO).await {
+            step(
+                self,
+                "Learning from this session: skills, knowledgepedia facts and profile notes…",
+            );
         }
-        if !self.scorer.wait_idle(SCORER_WAIT).await {
+        match wait_or_ui_closed(self.learner.wait_idle(left(LEARNER_WAIT)), commands).await {
+            Some(true) => {}
+            Some(false) => {
+                tracing::warn!("the learner did not finish before exit; the next start resumes it")
+            }
+            None => return self.finish_shutdown().await,
+        }
+        if !self.scorer.wait_idle(Duration::ZERO).await {
+            step(self, "Scoring finished plans for the lookup table…");
+        }
+        if wait_or_ui_closed(self.scorer.wait_idle(left(SCORER_WAIT)), commands).await
+            == Some(false)
+        {
             tracing::warn!("plans still waiting for the scorer; the next start scores them");
         }
+        self.finish_shutdown().await;
+    }
+
+    async fn finish_shutdown(&mut self) {
         self.memory_stop.cancel();
         self.router.shutdown().await;
+        self.send(UiEvent::ShutdownComplete);
     }
 
     /// Answers an approval directly (used by tests and non-UI drivers).
@@ -2098,6 +2417,22 @@ impl Core {
     }
 }
 
+/// Resolves once the UI has dropped its command sender (it quit without waiting).
+async fn ui_closed(commands: &mut mpsc::UnboundedReceiver<CoreCommand>) {
+    while commands.recv().await.is_some() {}
+}
+
+/// `idle`'s result, or `None` when the UI closed first.
+async fn wait_or_ui_closed(
+    idle: impl std::future::Future<Output = bool>,
+    commands: &mut mpsc::UnboundedReceiver<CoreCommand>,
+) -> Option<bool> {
+    tokio::select! {
+        done = idle => Some(done),
+        () = ui_closed(commands) => None,
+    }
+}
+
 fn load_direct(data: &DataDir) -> bool {
     std::fs::read(data.state_file())
         .ok()
@@ -2134,6 +2469,7 @@ fn format_mcp_status(enabled: bool, servers: &[ServerStatus]) -> String {
         let origin = match s.origin {
             McpOrigin::Global => "global",
             McpOrigin::Project => "project",
+            McpOrigin::Ide => "editor",
         };
         let state = match (&s.trust, &s.state) {
             (Trust::Pending, _) => "awaiting trust".to_owned(),
@@ -2172,12 +2508,21 @@ struct TurnJob {
     scorer_cfg: ScorerConfig,
     beat_interval: Duration,
     triage: Option<Triage>,
+    /// `llm.quick_triage`: simple messages skip the triage request.
+    quick_triage: bool,
+    triage_model: ModelRef,
     /// Set when the decision model is on for this turn.
     decider: Option<Arc<Decider>>,
     /// (learned query types, most used topics) for the decision model's choices.
     decision_vocab: (Vec<String>, Vec<String>),
     conversation: Conversation,
     usage: UsageSnapshot,
+    /// System notes added after the user message.
+    notes: Vec<String>,
+    /// `@`-mention attachments appended to the user message for the model only.
+    attachments: String,
+    /// Pasted images sent with the user message.
+    images: Vec<ImageData>,
     text: String,
 }
 
@@ -2263,8 +2608,12 @@ impl TurnJob {
         });
 
         let recent = self.conversation.transcript();
-        let fast = match &self.decider {
-            Some(d) => {
+        let quick = self
+            .quick_triage
+            .then(|| triage::quick(&self.text))
+            .flatten();
+        let fast = match (&self.decider, &quick) {
+            (Some(d), None) => {
                 let (types, topics) = &self.decision_vocab;
                 let fast = d
                     .triage(&self.text, &recent, types, topics, &self.ctx.cancel)
@@ -2272,9 +2621,14 @@ impl TurnJob {
                 (self.usage.session_in, self.usage.session_out) = sink.totals.get();
                 fast
             }
-            None => None,
+            _ => None,
         };
-        let triage = if let Some(mut t) = fast.as_ref().and_then(FastTriage::complete) {
+        let triage = if let Some(mut t) = quick {
+            tracing::info!(query_type = %t.query_type, "simple message: triage skipped");
+            t.knowledge_topics = self.knowledge.mentioned_in(&self.text);
+            self.triage = Some(t.clone());
+            t
+        } else if let Some(mut t) = fast.as_ref().and_then(FastTriage::complete) {
             tracing::info!("triage decided by the decision model");
             // No LLM listed knowledge topics; use entries the request names.
             t.knowledge_topics = self.knowledge.mentioned_in(&self.text);
@@ -2286,8 +2640,8 @@ impl TurnJob {
             }
             match triage::triage(
                 self.provider.as_ref(),
-                self.settings.provider,
-                &self.settings.model,
+                Some(self.triage_model.provider),
+                &self.triage_model.model,
                 &self.text,
                 &recent,
                 self.ctx.cancel.clone(),
@@ -2304,7 +2658,9 @@ impl TurnJob {
                     t
                 }
                 Err(LlmError::Cancelled) => {
-                    self.conversation.begin_exchange(&self.text);
+                    let text = format!("{}{}", self.text, self.attachments);
+                    self.conversation
+                        .begin_exchange_with(&text, std::mem::take(&mut self.images));
                     return self.finish(TurnEnd::Cancelled);
                 }
                 Err(e) => {
@@ -2329,7 +2685,12 @@ impl TurnJob {
             }
         }
 
-        self.conversation.begin_exchange(&self.text);
+        let text = format!("{}{}", self.text, self.attachments);
+        self.conversation
+            .begin_exchange_with(&text, std::mem::take(&mut self.images));
+        for note in std::mem::take(&mut self.notes) {
+            self.conversation.push(Message::system(note));
+        }
         if let Some(note) = self.knowledge_note(&triage) {
             self.conversation.push(Message::system(note));
         }

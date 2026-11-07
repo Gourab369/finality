@@ -17,6 +17,20 @@ pub struct ToolSchema {
     pub parameters: Value,
 }
 
+/// An image attached to a user message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageData {
+    /// e.g. `image/png`.
+    pub media_type: String,
+    pub base64: String,
+}
+
+impl ImageData {
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.base64)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Message {
     System {
@@ -24,6 +38,8 @@ pub enum Message {
     },
     User {
         content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageData>,
     },
     Assistant {
         content: String,
@@ -47,6 +63,14 @@ impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Message::User {
             content: content.into(),
+            images: Vec::new(),
+        }
+    }
+
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImageData>) -> Self {
+        Message::User {
+            content: content.into(),
+            images,
         }
     }
 
@@ -73,7 +97,7 @@ impl Message {
     pub fn content(&self) -> &str {
         match self {
             Message::System { content }
-            | Message::User { content }
+            | Message::User { content, .. }
             | Message::Assistant { content, .. }
             | Message::Tool { content, .. } => content,
         }

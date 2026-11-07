@@ -53,7 +53,7 @@ fn last_user(req: &ChatRequest) -> &str {
         .iter()
         .rev()
         .find_map(|m| match m {
-            Message::User { content } => Some(content.as_str()),
+            Message::User { content, .. } => Some(content.as_str()),
             _ => None,
         })
         .unwrap_or("")
@@ -229,6 +229,9 @@ struct Run {
 }
 
 fn start(env: &Env, provider: Arc<dyn LlmProvider>, config: Config) -> Run {
+    // Scripted providers expect a triage request for every prompt.
+    let mut config = config;
+    config.llm.quick_triage = false;
     let deps = CoreDeps {
         config,
         workspace: Workspace::from_dir(&env.work).unwrap(),

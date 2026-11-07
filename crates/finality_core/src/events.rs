@@ -13,6 +13,8 @@ pub enum NoticeLevel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusInfo {
     pub workdir: String,
+    /// Git branch of the working directory, if it is in a repository.
+    pub branch: Option<String>,
     pub session: Option<SessionId>,
     pub mode: Mode,
     pub provider: ProviderKind,
@@ -124,6 +126,8 @@ pub enum UiEvent {
     },
     /// Active skills, for slash completion and `/<skill-name>`.
     Skills(Vec<SkillInfo>),
+    /// Workdir-relative paths (folders end in `/`) for `@`-mention completion.
+    Files(Vec<String>),
     /// The decision model was switched on (after a passing probe) or off.
     DecideChanged {
         on: bool,
@@ -132,6 +136,12 @@ pub enum UiEvent {
     DirectChanged {
         on: bool,
     },
+    /// Quitting: what the core is doing before it exits (e.g. saving session memory).
+    ShuttingDown {
+        step: String,
+    },
+    /// The core finished shutting down; the UI can exit.
+    ShutdownComplete,
     /// A list to choose one entry from (`/resume` without an id, the model at start-up).
     Picker(PickerPrompt),
 }
@@ -233,6 +243,12 @@ pub enum SlashCommand {
     Model(String),
     /// `/model` without a name: pick one of the provider's models from a list.
     ChooseModel,
+    /// `/compact`: the Memory agent files the session into events, then the context keeps only the last exchanges.
+    Compact,
+    /// Internal follow-up once the Memory agent finished (`finished` is false after a timeout).
+    CompactApply {
+        finished: bool,
+    },
     Context,
     Subagents(u32),
     /// `/memory` shows the digest; `/memory recall <query>` searches past sessions.
@@ -262,6 +278,12 @@ pub enum SlashCommand {
     Decide(bool),
     /// `/direct [on|off]`; `None` toggles. Remembered across sessions.
     Direct(Option<bool>),
+    /// `/checkpoints`: list this session's edit checkpoints.
+    Checkpoints,
+    /// `/undo [n]`: restore files to before checkpoint `n` (default: the latest).
+    Undo(Option<u32>),
+    /// `/diff`: uncommitted changes in the working directory's git repository.
+    Diff,
 }
 
 /// Custom agent management.

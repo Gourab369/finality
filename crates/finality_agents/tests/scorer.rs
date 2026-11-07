@@ -189,6 +189,8 @@ fn env() -> Env {
 async fn session(env: &Env, provider: Arc<dyn LlmProvider>, prompt: &str) {
     let mut config = Config::default();
     config.general.default_mode = Mode::Auto;
+    // Scripted providers expect a triage request for every prompt.
+    config.llm.quick_triage = false;
     let deps = CoreDeps {
         config,
         workspace: Workspace::from_dir(&env.work).unwrap(),

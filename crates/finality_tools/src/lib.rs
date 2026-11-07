@@ -2,8 +2,11 @@
 
 pub mod active;
 pub mod browser;
+pub mod checkpoint;
 pub mod edit;
 pub mod executor;
+pub mod git;
+pub mod godot;
 pub mod html;
 pub mod read;
 pub mod registry;
@@ -14,6 +17,7 @@ pub mod web;
 
 pub use active::{ActiveToolSet, TOOL_SEARCH, ToolSearch, ToolSets};
 pub use browser::{BrowserAction, BrowserSession, BrowserTool};
+pub use checkpoint::{Checkpoint, Checkpoints};
 pub use executor::{ApprovalRequest, ApprovalResponse, Approver, Execution, ToolExecutor};
 pub use registry::{ToolRegistry, ToolSource};
 pub use tool::{

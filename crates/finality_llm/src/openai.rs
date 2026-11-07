@@ -141,8 +141,12 @@ impl LlmProvider for OpenAiProvider {
         cancel: CancellationToken,
     ) -> Result<ChatStream, LlmError> {
         let mut body = build_body(&req);
-        if self.template_thinking && req.think == ThinkLevel::Off {
-            body["chat_template_kwargs"] = json!({ "enable_thinking": false });
+        if self.template_thinking {
+            // llama-server: reuse the KV cache for the unchanged prompt prefix.
+            body["cache_prompt"] = json!(true);
+            if req.think == ThinkLevel::Off {
+                body["chat_template_kwargs"] = json!({ "enable_thinking": false });
+            }
         }
         let resp = self
             .request(Method::POST, "/chat/completions", Some(&body), &cancel)
@@ -161,7 +165,15 @@ impl LlmProvider for OpenAiProvider {
 fn message_json(m: &Message) -> Value {
     match m {
         Message::System { content } => json!({ "role": "system", "content": content }),
-        Message::User { content } => json!({ "role": "user", "content": content }),
+        Message::User { content, images } if !images.is_empty() => {
+            let mut parts: Vec<Value> = images
+                .iter()
+                .map(|i| json!({ "type": "image_url", "image_url": { "url": i.data_url() } }))
+                .collect();
+            parts.push(json!({ "type": "text", "text": content }));
+            json!({ "role": "user", "content": parts })
+        }
+        Message::User { content, .. } => json!({ "role": "user", "content": content }),
         Message::Assistant {
             content,
             tool_calls,

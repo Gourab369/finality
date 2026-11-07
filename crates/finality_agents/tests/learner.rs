@@ -59,7 +59,7 @@ fn last_user(req: &ChatRequest) -> &str {
         .iter()
         .rev()
         .find_map(|m| match m {
-            Message::User { content } => Some(content.as_str()),
+            Message::User { content, .. } => Some(content.as_str()),
             _ => None,
         })
         .unwrap_or("")
@@ -114,6 +114,8 @@ struct Scripted {
     knowledge_topics: Vec<String>,
     orchestrator: Box<Policy>,
     requests: Mutex<Vec<ChatRequest>>,
+    /// The learner model answers with invalid JSON (as if the run ended before it could work).
+    learner_fails: bool,
 }
 
 impl Scripted {
@@ -125,6 +127,18 @@ impl Scripted {
             knowledge_topics: knowledge_topics.iter().map(|t| (*t).to_owned()).collect(),
             orchestrator: Box::new(orchestrator),
             requests: Mutex::new(Vec::new()),
+            learner_fails: false,
+        })
+    }
+
+    fn with_failing_learner(
+        orchestrator: impl Fn(&ChatRequest) -> Reply + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            knowledge_topics: Vec::new(),
+            orchestrator: Box::new(orchestrator),
+            requests: Mutex::new(Vec::new()),
+            learner_fails: true,
         })
     }
 
@@ -166,6 +180,7 @@ impl LlmProvider for Scripted {
                 .to_string(),
             ),
             Kind::Memory => Reply::Text(memory_reply(&req).to_string()),
+            Kind::Learner if self.learner_fails => Reply::Text("not json".into()),
             Kind::Learner => Reply::Text(lesson().to_string()),
             Kind::Orchestrator => (self.orchestrator)(&req),
         };
@@ -217,6 +232,9 @@ struct Run {
 }
 
 fn start(env: &Env, provider: Arc<dyn LlmProvider>, config: Config) -> Run {
+    // Scripted providers expect a triage request for every prompt.
+    let mut config = config;
+    config.llm.quick_triage = false;
     let deps = CoreDeps {
         config,
         workspace: Workspace::from_dir(&env.work).unwrap(),
@@ -272,6 +290,48 @@ impl Run {
 
 fn answer(_: &ChatRequest) -> Reply {
     Reply::Text("Built it.".into())
+}
+
+#[tokio::test]
+async fn events_not_learned_before_quitting_are_learned_at_the_next_start() {
+    let env = env();
+    let mut run = start(
+        &env,
+        Scripted::with_failing_learner(answer),
+        Config::default(),
+    );
+    run.turn("write a zig hello world and build it").await;
+    run.quit().await;
+    let unlearned = |data: &DataDir| {
+        EventStore::main(data)
+            .load()
+            .unwrap()
+            .events()
+            .iter()
+            .filter(|v| !v.event.learned)
+            .count()
+    };
+    assert_eq!(unlearned(&env.data), 1, "kept for a later try");
+    let kb = Knowledgepedia::new(&env.data);
+    assert!(kb.index().map(|i| i.topics.is_empty()).unwrap_or(true));
+
+    let provider = Scripted::new(&[], answer);
+    let run = start(&env, provider.clone(), Config::default());
+    run.quit().await;
+    assert_eq!(
+        provider.of(Kind::Learner).len(),
+        1,
+        "start-up queued it again"
+    );
+    assert_eq!(unlearned(&env.data), 0);
+    let topics: Vec<String> = kb
+        .index()
+        .unwrap()
+        .topics
+        .into_iter()
+        .map(|t| t.topic)
+        .collect();
+    assert_eq!(topics, ["Zig build system"]);
 }
 
 #[tokio::test]

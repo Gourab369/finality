@@ -17,6 +17,7 @@ use ratatui::style::Color;
 fn status() -> StatusInfo {
     StatusInfo {
         workdir: r"C:\src\app".into(),
+        branch: None,
         session: None,
         mode: Mode::Cowork,
         provider: ProviderKind::Ollama,
@@ -252,6 +253,32 @@ fn ctrl_c_cancels_clears_and_quits() {
         ctrl_c(&mut app, t0 + Duration::from_secs(4)),
         vec![CoreCommand::Quit]
     );
+    assert!(
+        app.is_closing() && !app.should_quit(),
+        "waits for the core to save the session"
+    );
+    app.handle_ui_event(UiEvent::ShutdownComplete);
+    assert!(app.should_quit());
+}
+
+#[test]
+fn quitting_shows_progress_until_the_core_is_done() {
+    let mut app = App::new(status());
+    type_text(&mut app, "/quit");
+    assert_eq!(key(&mut app, KeyCode::Enter), vec![CoreCommand::Quit]);
+    app.handle_ui_event(UiEvent::ShuttingDown {
+        step: "Saving session memory".into(),
+    });
+    let screen = format!("{:?}", draw(&mut app, 100, 16).backend());
+    assert!(screen.contains("Quitting Finality") && screen.contains("Saving session memory"));
+    assert!(
+        key(&mut app, KeyCode::Char('x')).is_empty(),
+        "keys are ignored"
+    );
+    assert!(!app.should_quit());
+
+    // Ctrl+C leaves at once; the next start finishes the summary.
+    assert!(ctrl_c(&mut app, Instant::now()).is_empty());
     assert!(app.should_quit());
 }
 
@@ -281,6 +308,35 @@ fn slash_commands_complete_and_parse() {
 
     type_text(&mut app, "/quit");
     assert_eq!(key(&mut app, KeyCode::Enter), vec![CoreCommand::Quit]);
+}
+
+#[test]
+fn at_mentions_complete_paths() {
+    let mut app = App::new(status());
+    app.handle_ui_event(UiEvent::Files(vec![
+        "src/".into(),
+        "src/main.rs".into(),
+        "src/lib.rs".into(),
+        "docs/main_notes.md".into(),
+    ]));
+    type_text(&mut app, "explain @mai");
+    let screen = draw(&mut app, 80, 14).backend().to_string();
+    assert!(
+        screen.contains("@src/main.rs") && screen.contains("@docs/main_notes.md"),
+        "{screen}"
+    );
+    assert!(!screen.contains("@src/lib.rs"), "{screen}");
+    key(&mut app, KeyCode::Tab);
+    type_text(&mut app, "and @sr");
+    key(&mut app, KeyCode::Tab);
+    type_text(&mut app, "l");
+    key(&mut app, KeyCode::Tab);
+    assert_eq!(
+        key(&mut app, KeyCode::Enter),
+        vec![CoreCommand::UserPrompt(
+            "explain @src/main.rs and @src/lib.rs".into()
+        )]
+    );
 }
 
 #[test]

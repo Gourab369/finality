@@ -184,6 +184,7 @@ fn new_event(spans: &[Span], summary: &str, status: EventStatus, place: &Placeme
         related: Vec::new(),
         status,
         outcome: None,
+        learned: false,
     }
 }
 
