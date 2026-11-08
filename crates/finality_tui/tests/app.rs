@@ -340,6 +340,27 @@ fn at_mentions_complete_paths() {
 }
 
 #[test]
+fn completion_list_scrolls_to_the_selection() {
+    let mut app = App::new(status());
+    type_text(&mut app, "/");
+    let screen = draw(&mut app, 80, 14).backend().to_string();
+    assert!(!screen.contains("/init"), "cut off at first: {screen}");
+    for _ in 0..13 {
+        key(&mut app, KeyCode::Down);
+    }
+    let screen = draw(&mut app, 80, 14).backend().to_string();
+    assert!(
+        screen.contains("/init") && screen.contains("14/"),
+        "{screen}"
+    );
+    key(&mut app, KeyCode::Tab);
+    assert_eq!(
+        key(&mut app, KeyCode::Enter),
+        vec![CoreCommand::Slash(SlashCommand::Init)]
+    );
+}
+
+#[test]
 fn multiline_input_and_history() {
     let mut app = App::new(status());
     type_text(&mut app, "line one");

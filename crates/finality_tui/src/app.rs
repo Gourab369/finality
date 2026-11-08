@@ -1496,9 +1496,14 @@ fn render_completion(
         width,
         height,
     };
+    // Scroll so the selected command stays visible when the list is taller than the chat area.
+    let rows = usize::from(height.saturating_sub(2)).max(1);
+    let first = selected.saturating_sub(rows - 1);
     let lines: Vec<Line<'static>> = matches
         .iter()
         .enumerate()
+        .skip(first)
+        .take(rows)
         .map(|(i, c)| {
             let style = if i == selected {
                 Style::default()
@@ -1513,9 +1518,18 @@ fn render_completion(
             ])
         })
         .collect();
+    let title = if matches.len() > rows {
+        format!(
+            " Tab complete · ↑↓ select · {}/{} ",
+            selected + 1,
+            matches.len()
+        )
+    } else {
+        " Tab complete · ↑↓ select ".to_owned()
+    };
     frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" Tab complete · ↑↓ select ")),
+        Paragraph::new(lines).block(Block::bordered().title(title)),
         rect,
     );
 }
