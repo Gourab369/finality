@@ -30,7 +30,7 @@ pub enum Transport {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServerDef {
     pub name: String,
     pub origin: Origin,
@@ -39,8 +39,65 @@ pub struct ServerDef {
     pub read_only_hints: bool,
     /// Remote tool names to offer (`-` and `_` match each other); `None` offers every tool.
     pub tools: Option<Vec<String>>,
+    /// Values substituted for `${...}` references, scrubbed from everything the server sends back.
+    pub secrets: Secrets,
     /// Hash of the raw entry; trust and the tool cache are tied to it.
     pub fingerprint: String,
+}
+
+impl std::fmt::Debug for ServerDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerDef")
+            .field("name", &self.name)
+            .field("origin", &self.origin)
+            .field(
+                "transport",
+                &format_args!("{}", self.secrets.scrub(&format!("{:?}", self.transport))),
+            )
+            .field("read_only_hints", &self.read_only_hints)
+            .field("tools", &self.tools)
+            .field("secrets", &self.secrets)
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
+}
+
+/// Shorter values (ports, flags) are left alone; they would mangle unrelated text.
+const MIN_SECRET_CHARS: usize = 8;
+
+/// Secret values; `Debug` shows only how many there are.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Secrets(Vec<String>);
+
+impl std::fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Secrets({} hidden)", self.0.len())
+    }
+}
+
+impl Secrets {
+    pub fn new(values: impl IntoIterator<Item = String>) -> Self {
+        let mut v: Vec<String> = values
+            .into_iter()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| s.chars().count() >= MIN_SECRET_CHARS)
+            .collect();
+        // Longest first, so a secret containing another is replaced whole.
+        v.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        v.dedup();
+        Self(v)
+    }
+
+    /// `text` with these values and anything that looks like a credential replaced by `[REDACTED]`.
+    pub fn scrub(&self, text: &str) -> String {
+        let mut out = text.to_owned();
+        for s in &self.0 {
+            if out.contains(s.as_str()) {
+                out = out.replace(s.as_str(), finality_core::secrets::REDACTED);
+            }
+        }
+        finality_core::secrets::redact(&out).into_owned()
+    }
 }
 
 impl ServerDef {
@@ -214,7 +271,15 @@ fn parse_server(
     if s.disabled {
         return Ok(None);
     }
-    let expand = |text: &str| expand(text, lookup);
+    let substituted = std::cell::RefCell::new(Vec::new());
+    let recording = |var: &str| {
+        let value = lookup(var);
+        if let Some(v) = &value {
+            substituted.borrow_mut().push(v.clone());
+        }
+        value
+    };
+    let expand = |text: &str| expand(text, &recording);
     let map = |m: BTreeMap<String, String>| -> Result<BTreeMap<String, String>, String> {
         m.into_iter().map(|(k, v)| Ok((k, expand(&v)?))).collect()
     };
@@ -262,6 +327,7 @@ fn parse_server(
         // A project file must not be able to switch off approvals for its own server.
         read_only_hints: s.trust_read_only_hints && origin == Origin::Global,
         tools: s.tools,
+        secrets: Secrets::new(substituted.take()),
         fingerprint: fingerprint(raw),
     }))
 }
@@ -427,6 +493,39 @@ mod tests {
             l.problems[0].contains("keyring references work only in the global mcp.json"),
             "{:?}",
             l.problems
+        );
+    }
+
+    #[test]
+    fn substituted_values_are_scrubbed_and_never_printed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global = write(
+            tmp.path(),
+            "mcp.json",
+            r#"{"mcpServers": {"s": {"command": "x", "env": {"K": "${FINALITY_TEST_KEY}", "P": "${FINALITY_TEST_PORT}"}}}}"#,
+        );
+        let env = |var: &str| match var {
+            "FINALITY_TEST_KEY" => Some("abc123secretvalue".to_owned()),
+            "FINALITY_TEST_PORT" => Some("8080".to_owned()),
+            _ => None,
+        };
+        let raw: Value = serde_json::from_str::<Value>(&std::fs::read_to_string(&global).unwrap())
+            .unwrap()["mcpServers"]["s"]
+            .clone();
+        let def = parse_server("s", &raw, Origin::Global, &env)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            def.secrets
+                .scrub("Error: invalid key abc123secretvalue on port 8080"),
+            "Error: invalid key [REDACTED] on port 8080",
+            "short values are left alone"
+        );
+        assert!(!format!("{def:?}").contains("abc123secretvalue"));
+        assert_eq!(
+            Secrets::default().scrub("key tvly-dev-0123456789abcdefABCDEF here"),
+            "key [REDACTED] here",
+            "Tavily keys are recognized anywhere"
         );
     }
 

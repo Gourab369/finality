@@ -14,6 +14,7 @@ static WORDS: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9
 static PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
         r"sk-[A-Za-z0-9_-]{20,}",
+        r"tvly-[A-Za-z0-9_-]{16,}",
         r"gh[pousr]_[A-Za-z0-9]{30,}",
         r"github_pat_[A-Za-z0-9_]{20,}",
         r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",

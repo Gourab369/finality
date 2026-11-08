@@ -284,6 +284,8 @@ pub enum SlashCommand {
     Undo(Option<u32>),
     /// `/diff`: uncommitted changes in the working directory's git repository.
     Diff,
+    /// `/init`: the Orchestrator writes `~/.finality/FINALITY.md` from this project, unless it exists.
+    Init,
 }
 
 /// Custom agent management.

@@ -207,15 +207,18 @@ impl Tool for McpTool {
             .server
             .upgrade()
             .ok_or_else(|| ToolError::Failed("MCP is shutting down".into()))?;
+        let secrets = &server.def.secrets;
         let result = match server.call(&self.remote, args, &ctx.cancel).await {
             Ok(r) => r,
             Err(e) if ctx.cancel.is_cancelled() => {
-                tracing::debug!("{e}");
+                tracing::debug!("{}", secrets.scrub(&e));
                 return Err(ToolError::Cancelled);
             }
-            Err(e) => return Ok(ToolOutput::error(e)),
+            // Servers echo their configuration in errors, keys included.
+            Err(e) => return Ok(ToolOutput::error(secrets.scrub(&e))),
         };
         let (text, is_error) = render_result(&result);
+        let text = secrets.scrub(&text);
         let (content, truncated) =
             finality_tools::tool::truncate_middle(&text, ctx.limits.max_output_chars);
         Ok(ToolOutput {

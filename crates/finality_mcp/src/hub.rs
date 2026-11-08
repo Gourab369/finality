@@ -314,6 +314,7 @@ impl Server {
         if !tail.is_empty() {
             message.push_str(&format!("\nserver stderr:\n{}", tail.join("\n")));
         }
+        let message = self.def.secrets.scrub(&message);
         self.set_state(ServerState::Failed(message.clone()));
         message
     }
@@ -358,10 +359,15 @@ impl Server {
                     .spawn()
                     .map_err(|e| format!("cannot run `{command}`: {e}"))?;
                 if let Some(stderr) = stderr {
-                    let (tail, name) = (self.stderr.clone(), self.def.name.clone());
+                    let (tail, name, secrets) = (
+                        self.stderr.clone(),
+                        self.def.name.clone(),
+                        self.def.secrets.clone(),
+                    );
                     tokio::spawn(async move {
                         let mut lines = tokio::io::BufReader::new(stderr).lines();
                         while let Ok(Some(line)) = lines.next_line().await {
+                            let line = secrets.scrub(&line);
                             tracing::debug!(server = %name, "{line}");
                             if let Ok(mut t) = tail.lock() {
                                 if t.len() == STDERR_LINES {

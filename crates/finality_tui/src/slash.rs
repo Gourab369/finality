@@ -77,6 +77,11 @@ pub const COMMANDS: &[CommandInfo] = &[
         help: "Show uncommitted git changes",
     },
     CommandInfo {
+        name: "init",
+        args: "",
+        help: "Write your global instructions (~/.finality/FINALITY.md) from this project",
+    },
+    CommandInfo {
         name: "agents",
         args: "",
         help: "Show running agents in detail",
@@ -286,7 +291,8 @@ pub fn parse_with(input: &str, skills: &[String]) -> Result<SlashAction, String>
             _ => return Err(usage(&name)),
         },
         "diff" if args.is_empty() => SlashCommand::Diff,
-        "checkpoints" | "diff" => return Err(usage(&name)),
+        "init" if args.is_empty() => SlashCommand::Init,
+        "checkpoints" | "diff" | "init" => return Err(usage(&name)),
         "" => return Err("type a command name after /".into()),
         other if skills.iter().any(|s| s == other) => SlashCommand::Skill {
             name: other.to_owned(),

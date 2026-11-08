@@ -153,8 +153,26 @@ fn relative(path: &Path, workdir: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// Folders of installed dependencies and caches, left out of `@`-mention lists even without a `.gitignore`.
+const DEPENDENCY_DIRS: &[&str] = &[
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".nox",
+    ".gradle",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".venv",
+    "venv",
+];
+
 /// Paths relative to `root` of files and folders (folders end in `/`) down to `depth` levels, honoring
-/// `.gitignore`. At most `max` entries. Used for `@`-mentions.
+/// `.gitignore` and skipping dependency folders (Python virtual environments are recognized by `pyvenv.cfg`).
+/// At most `max` entries, shallowest first, so one huge folder cannot crowd out the rest. Used for `@`-mentions.
 pub fn list_paths(root: &Path, depth: Option<usize>, max: usize) -> Vec<String> {
     let walker = ignore::WalkBuilder::new(root)
         .hidden(false)
@@ -162,24 +180,37 @@ pub fn list_paths(root: &Path, depth: Option<usize>, max: usize) -> Vec<String> 
         .require_git(false)
         .git_global(false)
         .max_depth(depth)
-        .filter_entry(|e| e.file_name() != ".git")
+        .filter_entry(|e| {
+            if e.file_name() == ".git" {
+                return false;
+            }
+            // The root itself is listed even when it is such a folder (`@.venv`).
+            let dir = e.depth() > 0 && e.file_type().is_some_and(|t| t.is_dir());
+            !(dir
+                && (DEPENDENCY_DIRS.iter().any(|d| e.file_name() == *d)
+                    || e.path().join("pyvenv.cfg").is_file()))
+        })
         .build();
-    let mut out = Vec::new();
+    let scan_limit = max.saturating_mul(10);
+    let mut found: Vec<(usize, String)> = Vec::new();
     for entry in walker.flatten() {
         let rel = relative(entry.path(), root);
         if rel.is_empty() {
             continue;
         }
-        if entry.file_type().is_some_and(|t| t.is_dir()) {
-            out.push(format!("{rel}/"));
+        let rel = if entry.file_type().is_some_and(|t| t.is_dir()) {
+            format!("{rel}/")
         } else {
-            out.push(rel);
-        }
-        if out.len() >= max {
+            rel
+        };
+        found.push((entry.depth(), rel));
+        if found.len() >= scan_limit {
             break;
         }
     }
-    out
+    found.sort();
+    found.truncate(max);
+    found.into_iter().map(|(_, p)| p).collect()
 }
 
 fn search(
@@ -255,5 +286,39 @@ fn search_content(path: &Path, rel: &str, q: &Query, results: &mut Vec<String>) 
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mention_lists_skip_dependencies_and_prefer_shallow_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for dir in [
+            "env/lib/site-packages/pkg",
+            "node_modules/x",
+            "src/deep/er",
+            "docs",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("env/pyvenv.cfg"), "home = C:\\Python").unwrap();
+        std::fs::write(root.join("env/lib/site-packages/pkg/mod.py"), "").unwrap();
+        std::fs::write(root.join("node_modules/x/index.js"), "").unwrap();
+        std::fs::write(root.join("src/deep/er/main.py"), "").unwrap();
+        std::fs::write(root.join("README.md"), "").unwrap();
+
+        let all = list_paths(root, None, 100);
+        assert!(
+            !all.iter()
+                .any(|p| p.starts_with("env") || p.starts_with("node_modules")),
+            "{all:?}"
+        );
+        assert!(all.contains(&"src/deep/er/main.py".to_owned()), "{all:?}");
+        assert_eq!(list_paths(root, None, 3), ["README.md", "docs/", "src/"]);
+        assert!(list_paths(&root.join("env"), Some(1), 10).contains(&"pyvenv.cfg".to_owned()));
     }
 }

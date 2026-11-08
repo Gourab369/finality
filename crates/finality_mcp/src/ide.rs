@@ -32,6 +32,7 @@ pub fn server_def(ide_dir: &Path) -> Option<ServerDef> {
         },
         read_only_hints: true,
         tools: None,
+        secrets: Default::default(),
         // Stable, so the tool list cache survives port changes.
         fingerprint: "ide-vscode-1".into(),
     })

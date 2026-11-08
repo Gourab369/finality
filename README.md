@@ -285,7 +285,8 @@ never to do, and it does not change modes, approvals or the handling of untruste
 Put project conventions in `AGENTS.md` or `FINALITY.md` at the root of the working directory, and personal ones in
 `~/.finality/FINALITY.md`. All three are added to the Orchestrator's and sub-agents' system prompts (global first, then
 `AGENTS.md`, then `FINALITY.md`; together at most 16,000 characters). They are read again for every turn, so edits apply
-right away. They cannot change the mode, approvals or safety rules.
+right away. They cannot change the mode, approvals or safety rules. You write these files; `/init` drafts the global one
+for you from the current project (environment, working rules, style) when it does not exist yet.
 
 ### Cost and speed
 
@@ -356,7 +357,8 @@ commits; it runs your commit hooks, so it is treated like a shell command. `/dif
 **`@` mentions.** Type `@` and part of a path to pick a file or folder from the working directory (Tab inserts it). A
 mentioned file is attached to your message (up to 50,000 characters each, 100,000 in total); a folder is attached as a
 listing two levels deep. Paths outside the working directory are not attached. The session log keeps your text without
-the attachments.
+the attachments. The list skips `.gitignore`d paths and dependency folders (Python virtual environments, `node_modules`,
+`__pycache__` and similar caches); typing the full path of a file inside them still attaches it.
 
 **Images.** Alt+V saves the clipboard image as a PNG in `~/.finality/attachments/` and inserts `[image: <path>]`; pasting
 or typing the path of a PNG, JPEG, GIF or WebP file works too. Images are sent with the message to models that accept them
@@ -381,6 +383,7 @@ vision projector, so its models can't read images.
 | `/checkpoints` | List the files saved before each turn's edits |
 | `/undo [n]` | Restore files to before the latest checkpoint, or before checkpoint `n` |
 | `/diff` | Show `git status` and the uncommitted diff |
+| `/init` | Have the agent study this project and write your global instructions, `~/.finality/FINALITY.md` (only if the file does not exist yet) |
 | `/agents`, `/tasks` | Show running agents and the current plan |
 | `/subagents <n>` | Set how many sub-agents may run at once |
 | `/decide <on\|off>` | Use the decision model where it is confident |

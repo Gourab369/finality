@@ -449,6 +449,55 @@ async fn triage_runs_on_the_pinned_memory_model() {
 }
 
 #[tokio::test]
+async fn init_writes_the_global_instructions_once() {
+    let (tmp, work, data) = dirs();
+    let target = data.instructions_file();
+    let mock = Arc::new(
+        MockProvider::new()
+            .then_text(&triage(true))
+            .then_tool_call(
+                "edit_file",
+                json!({ "path": target.display().to_string(), "operations": [
+                    { "op": "write", "content": "# Global instructions\n" }
+                ] }),
+            )
+            .then_text("Wrote your global instructions."),
+    );
+    let mut h = start(mock.clone(), Mode::Cowork, Some((tmp, work, data)));
+    h.send(CoreCommand::Slash(SlashCommand::Init));
+    h.until(
+        |e| matches!(e, UiEvent::TurnFinished { .. }),
+        Some(ApprovalChoice::AllowOnce),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "# Global instructions\n"
+    );
+    h.send(CoreCommand::Slash(SlashCommand::Init));
+    h.until(
+        |e| matches!(e, UiEvent::Notice { text, .. } if text.contains("already exists")),
+        None,
+    )
+    .await;
+    let (.., seen) = h.quit().await;
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, UiEvent::Approval(p) if !p.inside)),
+        "writing outside the project asks first"
+    );
+    let named = mock
+        .requests()
+        .iter()
+        .flat_map(|r| r.messages.clone())
+        .any(|m| {
+            matches!(m, Message::User { content, .. }
+            if content.contains("/init") && content.contains(&target.display().to_string()))
+        });
+    assert!(named, "the prompt names the file");
+}
+
+#[tokio::test]
 async fn denied_tool_call_is_reported_to_the_model() {
     let mock = Arc::new(
         MockProvider::new()

@@ -982,6 +982,7 @@ impl Core {
             CoreCommand::Slash(SlashCommand::Skill { name, args }) => {
                 self.run_skill(&name, &args, done_tx).await;
             }
+            CoreCommand::Slash(SlashCommand::Init) => self.run_init(done_tx).await,
             CoreCommand::Slash(SlashCommand::CompactApply { finished }) => {
                 self.apply_compaction(finished, done_tx).await;
             }
@@ -1012,6 +1013,32 @@ impl Core {
         );
         self.send(UiEvent::UserMessage {
             text: format!("/{name} {}", args.trim()).trim_end().to_owned(),
+        });
+        Box::pin(self.handle(CoreCommand::UserPrompt(prompt), done_tx)).await;
+    }
+
+    /// `/init`: a turn in which the Orchestrator writes the global instruction file from this project.
+    async fn run_init(&mut self, done_tx: &mpsc::UnboundedSender<TurnDone>) {
+        let path = self.data.instructions_file();
+        if path.exists() {
+            return self.notice(
+                NoticeLevel::Info,
+                format!(
+                    "{} already exists; edit it directly (it is read again on every turn)",
+                    path.display()
+                ),
+            );
+        }
+        if self.status.mode == Mode::Plan {
+            return self.notice(
+                NoticeLevel::Warning,
+                "/init writes a file, which plan mode does not allow; switch with /mode cowork",
+            );
+        }
+        let prompt =
+            include_str!("../prompts/init.md").replace("{{path}}", &path.display().to_string());
+        self.send(UiEvent::UserMessage {
+            text: "/init".into(),
         });
         Box::pin(self.handle(CoreCommand::UserPrompt(prompt), done_tx)).await;
     }
@@ -1564,7 +1591,7 @@ impl Core {
                     "decision model off; the orchestrator decides with its own model",
                 );
             }
-            SlashCommand::Skill { .. } => {}
+            SlashCommand::Skill { .. } | SlashCommand::Init => {}
         }
     }
 
