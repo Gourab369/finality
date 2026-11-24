@@ -514,16 +514,7 @@ Session logs grow without limit by default; set `general.session_retention_days`
 closed sessions older than a cutoff.
 
 ## Roadmap
-
-Platforms:
-- [ ] Linux (x86_64, ARM) and macOS (Apple Silicon, Intel): pre-built release binaries, and CI on both systems again
-  (including the OS sandbox tests). Until then, install from source; the code supports them, but they are untested.
-- [ ] Linux: a static `musl` build so the binary runs on older distributions.
-
-Distribution:
-- [ ] Code-signed Windows binaries (and notarized macOS binaries once those exist).
-- [ ] Package managers: winget, Scoop and Homebrew.
-
+  - To be added.
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
